@@ -1,0 +1,52 @@
+#!/usr/bin/env node
+// career-ops-pool-fix-titles — recover titles the pool dedup dropped.
+//
+// The pool TSV keeps the FIRST read of each id; LinkedIn's virtualized list
+// returns many cards with empty innerText, so ~78% of titles landed as "".
+// The .tsv.raw file holds every read of every keyword, so an id emptied on one
+// keyword often carries its real title on another. Keep the longest non-empty
+// title per id (and the keyword that produced it).
+//
+// Usage: career-ops-pool-fix-titles [pool-YYYY-MM-DD.tsv]
+import { readFileSync, writeFileSync, existsSync, copyFileSync } from 'node:fs';
+import { DATA_DIR, assertNotUpstream } from './lib/paths.mjs';
+
+const today = new Date().toISOString().slice(0, 10);
+const tsv = process.argv[2] || `${DATA_DIR}/pool-${today}.tsv`;
+const raw = `${tsv}.raw`;
+if (!existsSync(tsv) || !existsSync(raw)) { console.error(`missing ${tsv} or ${raw}`); process.exit(2); }
+assertNotUpstream(tsv, 'write fixed pool');
+
+const best = new Map(); // id -> {title, keyword}
+let recovered = 0, empty = 0, total = 0;
+
+for (const line of readFileSync(raw, 'utf-8').split('\n')) {
+  if (!line.trim()) continue;
+  const [idtitle, kw = ''] = line.split('\t');
+  const [id, ...rest] = (idtitle || '').split('|');
+  const title = rest.join('|').trim();
+  if (!/^\d+$/.test(id)) continue;
+  total++;
+  const cur = best.get(id);
+  if (!cur) { best.set(id, { title, keyword: kw }); continue; }
+  // prefer a longer (non-empty) title; keep the first keyword that produced one
+  if (title.length > (cur.title || '').length) {
+    best.set(id, { title, keyword: cur.title ? cur.keyword : kw });
+  }
+}
+
+// preserve the original TSV order (dedup order), substitute better titles
+const lines = readFileSync(tsv, 'utf-8').split('\n').filter(l => l.trim());
+copyFileSync(tsv, `${tsv}.pre-fix.bak`);
+const out = [lines[0]];
+for (const line of lines.slice(1)) {
+  const [id, title = '', keyword = ''] = line.split('\t');
+  const b = best.get(id);
+  const better = b && (b.title || '').length > title.length ? b.title : title;
+  const kw = b && (b.title || '').length > title.length && b.keyword ? b.keyword : keyword;
+  if (!better) empty++;
+  if (better && better !== title) recovered++;
+  out.push(`${id}\t${better}\t${kw}`);
+}
+writeFileSync(tsv, out.join('\n') + '\n', 'utf-8');
+console.log(`raw reads: ${total} | ids: ${best.size} | titulos recuperados: ${recovered} | ainda sem titulo: ${empty}`);

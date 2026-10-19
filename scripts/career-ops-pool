@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+# career-ops-pool — varre o pool REAL de vagas Easy Apply do LinkedIn.
+#
+# Por que isto existe (2026-10-14): o coletor antigo contava as vagas por
+# `a[href*="/jobs/view/"]`, que só existe em ~7-9 dos 25 cards de cada página,
+# e nunca paginava de verdade — então reportava ~20 vagas únicas "no pool
+# inteiro" quando UMA palavra-chave já rende 150+.
+#
+# Correções embutidas:
+#   1. enumera por `li[data-occludable-job-id]` (25 por página, atributo estável)
+#   2. pagina de verdade com &start=N até a página parar de trazer id novo
+#   3. dedupa por id entre todas as palavras-chave
+#   4. grava manifesto com observabilidade (páginas lidas, ids por keyword)
+#
+# Uso:
+#   career-ops-pool                        # lista default de keywords
+#   career-ops-pool --keywords "react|vue" # sobrescreve
+#   career-ops-pool --max-pages 8          # teto de páginas por keyword
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/paths.sh
+. "$SCRIPT_DIR/lib/paths.sh"
+
+P="${CDP_BIN:-$CAREER_OPS_SCRIPTS/cdp}"
+OUT_DIR="${POOL_DIR:-$CAREER_OPS_DATA}"
+CDP_PORT="${CDP_PORT:-9333}"
+CDP_HEALTH="${CDP_HEALTH:-http://127.0.0.1:$CDP_PORT/json/version}"
+MAX_PAGES=6
+KEYWORDS="desenvolvedor|react|full stack|node|vue|software engineer|front end|typescript|javascript|developer remote|desenvolvedor remoto|backend|analista de desenvolvimento"
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --keywords) KEYWORDS="$2"; shift 2 ;;
+    --max-pages) MAX_PAGES="$2"; shift 2 ;;
+    --out) OUT_DIR="$2"; shift 2 ;;
+    *) echo "arg desconhecido: $1" >&2; exit 2 ;;
+  esac
+done
+
+career_ops_assert_not_upstream "$OUT_DIR" "output do pool" || exit 1
+mkdir -p "$OUT_DIR"
+TSV="$OUT_DIR/pool-$(date +%F).tsv"
+JSON="$OUT_DIR/pool-$(date +%F).json"
+: > "$TSV.raw"
+
+if ! curl -sf "$CDP_HEALTH" >/dev/null; then
+  echo "ERRO: navegador CDP fora do ar — rode career-ops-browser" >&2; exit 1
+fi
+
+# extrai id + titulo de cada card (id pela attribute, titulo do texto do card)
+EXTRACT='(()=>[...document.querySelectorAll("li[data-occludable-job-id]")].map(function(x){var t=(x.innerText||"").replace(/\s+/g," ").trim().slice(0,70).replace(/\|/g," ");return x.getAttribute("data-occludable-job-id")+"|"+t;}).join("~"))()'
+
+IFS='|' read -ra KW_ARR <<< "$KEYWORDS"
+TOTAL_RAW=0
+for KW in "${KW_ARR[@]}"; do
+  EKW=$(python3 -c "import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1]))" "$KW")
+  PAGES=0; LIDOS=0; NOVOS=0
+  for ((S=0; S<MAX_PAGES*25; S+=25)); do
+    URL="https://www.linkedin.com/jobs/search/?f_AL=true&keywords=$EKW&start=$S"
+    timeout 25 "$P" goto "$URL" >/dev/null 2>&1
+    sleep 3
+    RAW=$(timeout 20 "$P" eval "$EXTRACT" 2>/dev/null | tail -1)
+    [ -z "$RAW" ] && break
+    C=$(printf '%s' "$RAW" | tr '~' '\n' | grep -c .)
+    printf '%s' "$RAW" | tr '~' '\n' | grep . | sed "s/\$/\t$KW/" >> "$TSV.raw"
+    PAGES=$((PAGES+1)); LIDOS=$((LIDOS+C)); TOTAL_RAW=$((TOTAL_RAW+C))
+    # página vazia/encurtada = fim do pool desta keyword
+    [ "$C" -lt 10 ] && break
+  done
+  NOVOS=$(cut -f1 "$TSV.raw" | sort -u | grep -c .)
+  echo "kw=$KW | paginas=$PAGES | cards_lidos=$LIDOS | unicos_acumulados=$NOVOS"
+done
+
+# dedup por id preservando a keyword e o titulo
+python3 - "$TSV" "$TSV.raw" "$JSON" "$KEYWORDS" "$TOTAL_RAW" <<'PY'
+import sys, json, collections, datetime
+tsv, raw, js, keywords, total_raw = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], int(sys.argv[5])
+seen={}
+per_kw=collections.Counter()
+for line in open(raw, encoding='utf-8', errors='replace'):
+    parts=line.rstrip('\n').split('\t')
+    if len(parts) < 2: continue
+    idtitle, kw = parts[0], parts[1]
+    jid, _, title = idtitle.partition('|')
+    if not jid.isdigit(): continue
+    per_kw[kw]+=1
+    if jid not in seen:
+        seen[jid]={'id':jid,'title':title,'keyword':kw}
+with open(tsv,'w',encoding='utf-8') as f:
+    f.write("id\ttitle\tkeyword\n")
+    for jid,v in seen.items():
+        f.write(f"{jid}\t{v['title']}\t{v['keyword']}\n")
+manifest={
+ 'ran_at': datetime.datetime.now().isoformat(timespec='seconds'),
+ 'keywords': keywords.split('|'),
+ 'cards_lidos': total_raw,
+ 'vagas_unicas': len(seen),
+ 'duplicatas_entre_keywords': total_raw-len(seen),
+ 'por_keyword': dict(per_kw),
+ 'tsv': tsv,
+}
+json.dump(manifest, open(js,'w',encoding='utf-8'), indent=2, ensure_ascii=False)
+print(f"\nTOTAL: {total_raw} cards lidos -> {len(seen)} vagas unicas")
+print(f"manifesto: {js}")
+PY

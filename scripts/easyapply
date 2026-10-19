@@ -1,0 +1,706 @@
+#!/usr/bin/env python3
+"""easyapply — preenche o Easy Apply do LinkedIn via CDP (usa o driver cdp irmão).
+
+Uso:
+  easyapply --url <job-url> --cv <caminho.pdf> --answers <answers.json> [--submit]
+
+answers.json: {"<trecho da pergunta>": "<resposta>", ...}  (match case-insensitive por substring)
+Sem --submit ele só preenche e PARA antes de enviar, listando o que ficou sem resposta.
+
+Por que existe: o fluxo manual custou ~20 chamadas por vaga. Este script faz o ciclo
+inteiro (abrir form -> upload do CV -> preencher pelo TEXTO da pergunta -> avancar ->
+submeter -> verificar) e para sozinho quando encontra pergunta obrigatoria sem resposta.
+"""
+import argparse, importlib.util, json, os, re, sys, time
+
+from importlib.machinery import SourceFileLoader
+
+# o driver nao tem extensao .py, entao spec_from_file_location devolve None:
+# precisa de um loader explicito. Resolve o cdp copiado ao lado deste arquivo
+# (CDP_BIN permite apontar para outro driver).
+_cdp_path = os.environ.get("CDP_BIN", os.path.join(os.path.dirname(os.path.realpath(__file__)), "cdp"))
+_loader = SourceFileLoader("cdpdriver", _cdp_path)
+spec = importlib.util.spec_from_loader("cdpdriver", _loader)
+cdp_mod = importlib.util.module_from_spec(spec)
+_loader.exec_module(cdp_mod)
+
+# Templates JS embutidos (antes liam /tmp/radio-tpl.js e /tmp/select-tpl.js — sumiam
+# no reboot e o matcher do radio casava pela 1a palavra do avo, que naqueles radios
+# customizados contem a PERGUNTA inteira, entao nunca dava match: "opcao nao achou").
+TPL_SELECT = r'''(() => { const sel = document.querySelector('select[data-ea-sel="__IDX__"]') || [...document.querySelectorAll('select')][__IDX__]; if (!sel) return JSON.stringify({err: 'sem select no indice'});
+  const alvo = "__TARGET__".trim().toLowerCase();
+  const txt = o => (o.text || '').trim();
+  const opt = [...sel.options].find(o => txt(o).toLowerCase() === alvo)
+           || [...sel.options].find(o => txt(o).toLowerCase().startsWith(alvo))
+           || [...sel.options].find(o => txt(o).toLowerCase().includes(alvo));
+  if (!opt) return JSON.stringify({err: 'opcao nao achou', opcoes: [...sel.options].map(txt).slice(0, 30)});
+  const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value').set;
+  setter.call(sel, opt.value);
+  sel.dispatchEvent(new Event('change', {bubbles: true}));
+  return JSON.stringify({ok: true, escolhido: txt(opt)});
+})()'''
+
+TPL_RADIO = r'''(() => {
+  const norm = s => (s || '').replace(/\s+/g, ' ').trim();
+  const alvo = "__TARGET__".trim().toLowerCase();
+  const grupo = "__NAME__";
+  const radios = [...document.querySelectorAll('input[type=radio]')].filter(r => (r.name || '') === grupo);
+  if (!radios.length) return JSON.stringify({err: 'grupo sem radios', grupo});
+  const val = r => (r.value || '').toLowerCase();
+  // label CURTO do container da propria opcao (a pergunta inteira fica mais acima)
+  const curto = r => {
+    const paiEl = r.parentElement, avoEl = paiEl ? paiEl.parentElement : null;
+    let t = norm((avoEl || {}).innerText || '') || norm((paiEl || {}).innerText || '');
+    if (t) return t.slice(0, 40).toLowerCase();
+    let node = r.parentElement;
+    for (let k = 0; k < 4 && node; k++) {
+      const tt = norm(node.innerText || '');
+      if (tt && tt.length <= 60) return tt.slice(0, 40).toLowerCase();
+      node = node.parentElement;
+    }
+    return '';
+  };
+  const el = radios.find(r => val(r) === alvo || curto(r) === alvo || curto(r).startsWith(alvo));
+  if (!el) return JSON.stringify({err: 'opcao nao achou', alvo,
+    disponiveis: radios.map(r => ({valor: val(r), label: curto(r)}))});
+  el.scrollIntoView({block: 'center'});
+  let box = el.getBoundingClientRect();
+  if (!box.width || !box.height) {
+    let node = el.parentElement;
+    for (let k = 0; k < 3 && node; k++) {
+      const b = node.getBoundingClientRect();
+      if (b.width && b.height && b.height < 80) { box = b; break; }
+      node = node.parentElement;
+    }
+  }
+  return JSON.stringify({x: Math.round(box.left + box.width/2), y: Math.round(box.top + box.height/2),
+    valor: val(el), label: curto(el)});
+})()'''
+
+TPL_RESUME = r'''(() => {
+  const fb = "__FALLBACK__";
+  const radios = [...document.querySelectorAll('input[type=radio]')];
+  const r = radios.find(x => (((x.getAttribute('aria-label')||'') + ' ' +
+      (x.parentElement ? (x.parentElement.innerText||'') : '')).toLowerCase().includes(fb)));
+  if (!r) return JSON.stringify({erro: 'resume fallback nao achou',
+    disponiveis: radios.map(x => x.getAttribute('aria-label')).filter(Boolean).slice(0, 12)});
+  r.scrollIntoView({block: 'center'});
+  r.click();
+  return JSON.stringify({ok: true, escolhido: r.getAttribute('aria-label')});
+})()'''
+
+FIND = r"""(regexSrc) => {
+  const re = new RegExp(regexSrc, 'i');
+  const norm = s => (s||'').replace(/\s+/g,' ').trim();
+  const el = [...document.querySelectorAll('button, a, label')].find(b => re.test(norm(b.innerText)));
+  if (!el) return JSON.stringify({err: 'nao achou: ' + regexSrc});
+  el.scrollIntoView({block:'center'});
+  const r = el.getBoundingClientRect();
+  return JSON.stringify({x: Math.round(r.left + r.width/2), y: Math.round(r.top + r.height/2), label: norm(el.innerText)});
+}"""
+
+# 2026-10-12: alguns inputs do form sobem a arvore e pegam o texto da navbar do
+# LinkedIn como se fosse rotulo ("Início Minha rede Vagas Mensagens ..."). Isso
+# gerava uma "pergunta" fantasma que travava o form. Filtra aqui.
+NAV_RE = re.compile(
+    r"In[íi]cio|Minha rede|Notifica[çc][õo]es|Para neg[óo]cios|"
+    r"Pular para|Atalhos do teclado|Experimente novamente|Mensagens\s+\d|"
+    r"^\s*Eu\s*$|Tentar Premium|Meus itens|Rastreador de vagas", re.I)
+
+def _e_opcional(p):
+    """Campo de texto declaradamente opcional: nao pode travar o formulario.
+    2026-10-14: Stack Builders pedia 'If you wish, please specify your pronouns.'
+    e a fila parou por causa disso."""
+    return bool(re.search(r"if you wish|optional|opcional|se desejar|se quiser|"
+                          r"n[ãa]o obrigat[óo]rio|preenchimento opcional|\(optional\)",
+                          p or "", re.I))
+
+
+def _e_chrome(txt):
+    """True se o texto parece chrome de UI (nav/rodape), nao pergunta de form."""
+    if not txt:
+        return True
+    return bool(NAV_RE.search(txt))
+
+STATE = r"""(() => {
+  const norm = s => (s||'').replace(/\s+/g,' ').trim();
+  const t = (document.body ? document.body.innerText : '');
+  const pag = (t.match(/(\d+) de (\d+) páginas?/) || []);
+  // escopo: so o container do formulario. Sem isso o seletor de idioma da pagina
+  // entrava na lista como se fosse campo do formulario.
+  const hdr = [...document.querySelectorAll('h1,h2,h3,div,span')].find(e =>
+    /\b(de \d+ páginas?|of \d+ pages?)/.test(norm(e.innerText)) && norm(e.innerText).length < 140);
+  let container = null, ctrl = 0, nd = hdr; for (let k = 0; k < 12 && nd; k++) { const c = nd.querySelectorAll('input,textarea,select').length; const temBusca = !!nd.querySelector('input[placeholder="Pesquisar"], input[placeholder="Search"]'); if (c >= 1 && c <= 25 && !temBusca && c > ctrl) { container = nd; ctrl = c; } nd = nd.parentElement; }
+  const scope = container || document;
+  const inputs = [...scope.querySelectorAll('input:not([type]), input[type=text], textarea')];
+  inputs.forEach((el, i) => el.setAttribute('data-ea-idx', i));
+  const perguntas = inputs.map((el, i) => {
+    let node = el, txt = '';
+    for (let k = 0; k < 6 && node; k++) {
+      node = node.parentElement;
+      let c = norm((node || {}).innerText || '');
+      // limpa contadores tipo "0/20" e "0 de 20 caracteres" que vinham junto do label
+      c = c.replace(/\d+\s*\/\s*\d+/g, '').replace(/\d+\s+de\s+\d+\s+caracteres?/gi, '').trim();
+      if (/[?]/.test(c) || (c.length > 12 && c.length < 200 && !/^Voltar/.test(c))) { txt = c; break; }
+    }
+    const g = txt.split(/\s*(?:Voltar|Avaliar|Avançar)/)[0];
+    // aria-label tem prioridade: e ali que o LinkedIn poe "School", "City",
+    // "Degree" — o texto visivel do rotulo mora em outro ramo do DOM.
+    const rotulo = el.getAttribute('aria-label') || g;
+    return {i, pergunta: rotulo.slice(0, 170), valor: el.value};
+  });
+  const fileInput = scope.querySelector('input[type=file]');
+  const grupos = {};
+  [...scope.querySelectorAll('input[type=radio]')].forEach(r => {
+    const name = r.name || 'sem-nome';
+    if (!grupos[name]) {
+      // a pergunta vive no aria-label do input (mais confiavel que subir a arvore)
+      let q = r.getAttribute('aria-label') || '';
+      if (!q) {
+        let node = r;
+        for (let k = 0; k < 8 && node; k++) {
+          node = node.parentElement;
+          let c = norm((node || {}).innerText || '');
+          c = c.replace(/\d+\s*\/\s*\d+/g, '').replace(/\d+\s+de\s+\d+\s+caracteres?/gi, '').trim();
+          if (c.length > 10 && c.length < 300) { q = c; break; }
+        }
+      }
+      grupos[name] = {name, pergunta: q.slice(0, 170), opcoes: [], respondido: false};
+    }
+    // o <label> dentro do div do input e so o circulo visual (sem texto);
+    // o texto da opcao ("Yes"/"No") fica no AVO do input.
+    const paiEl = r.parentElement, avoEl = paiEl ? paiEl.parentElement : null;
+    const lbl = norm((avoEl || {}).innerText || '') || norm((paiEl || {}).innerText || '') || r.value || '';
+    grupos[name].opcoes.push({label: lbl.slice(0, 40), value: r.value, checked: !!r.checked});
+    if (r.checked) grupos[name].respondido = true;
+  });
+  const checks = [...scope.querySelectorAll('input[type=checkbox]')].map((c, i) => {
+    let node = c, q = c.getAttribute('aria-label') || '';
+    for (let k = 0; k < 8 && node && !q; k++) {
+      node = node.parentElement;
+      const t2 = norm((node || {}).innerText || '');
+      if (t2.length > 6 && t2.length < 120) { q = t2; break; }
+    }
+    return {i, id: c.id || '', marcado: !!c.checked, pergunta: q.slice(0, 150)};
+  });
+  const selects = [...scope.querySelectorAll('select')].map((s, i) => {
+    s.setAttribute('data-ea-sel', i);
+    let node = s, q = '';
+    for (let k = 0; k < 6 && node; k++) {
+      node = node.parentElement;
+      let c = norm((node || {}).innerText || '');
+      c = c.replace(/\d+\s*\/\s*\d+/g, '').replace(/\d+\s+de\s+\d+\s+caracteres?/gi, '').trim();
+      // A lista de opcoes ("Selecionar opção ...") mora num ancestral MAIS PROXIMO
+      // que o rotulo: num <select> Sim/Nao o 1o ancestral e so a lista, entao
+      // `pergunta` virava "Selecionar opção Sim Não" e o select obrigatorio nao
+      // casava por chave (CI&T/Lever, 2026-10-08). Corta a pergunta na lista.
+      const cut = c.indexOf('Selecionar opção');
+      const cand = (cut >= 0 ? c.slice(0, cut) : c).trim();
+      if (cand.length > 6 && cand.length < 500) { q = cand; break; }
+    }
+    if (!q) {
+      // fallback: quando a pergunta e a lista dividem um ancestral que estoura o
+      // limite, pega do inicio ate o 1o '?'.
+      let n2 = s;
+      for (let k = 0; k < 8 && n2; k++) {
+        n2 = n2.parentElement;
+        if (!n2) break;
+        const c2 = norm(n2.innerText || '');
+        const qi = c2.indexOf('?');
+        if (qi > 8 && qi < 200) { q = c2.slice(0, qi + 1); break; }
+      }
+    }
+    // 2026-10-14: o LinkedIn NAO usa o atributo `required` nos selects do Easy Apply
+    // (School/Dates attended etc.) — valida por mensagem ("Este campo e obrigatorio").
+    // Sem isto o script marcava como OPCIONAL um campo obrigatorio, pulava, e ficava
+    // girando no "Avaliar" ate estourar o limite de passos (visto na Crossing Hurdles).
+    const _req = (() => {
+      if (s.required) return true;
+      if ((s.getAttribute('aria-required') || '').toLowerCase() === 'true') return true;
+      let n3 = s;
+      for (let k = 0; k < 5 && n3; k++) {
+        n3 = n3.parentElement;
+        if (!n3) break;
+        const c3 = norm(n3.innerText || '');
+        if (/obrigat[oó]rio|required|preencha este campo|this field is required/i.test(c3)) return true;
+        if (c3.length > 320) break;
+      }
+      return false;
+    })();
+    return {i, id: s.id || '', value: s.value, obrigatorio: _req,
+            pergunta: (s.getAttribute('aria-label') || q || '').slice(0, 150),
+            opcoes: [...s.options].map(o => (o.text || '').trim()).slice(0, 25)};
+  });
+  return JSON.stringify({
+    url: location.href, titulo: document.title, grupos, selects, checks,
+    pagina: pag.length ? pag[1] + '/' + pag[2] : null,
+    curriculo: /Curr[íi]culo\*|Resume\*|Resume \*/.test(t),
+    // Variante de Easy Apply SEM cabecalho "N de M paginas": o form existe (contato +
+    // lista de CVs) mas `pagina` fica null e o script achava que nada tinha aberto.
+    // Visto em 2026-10-07 em 3 vagas (INDI x2, GeorgiaTEK).
+    formAberto: /Contact info|Informa[çc][õo]es de contato|Contact details/i.test(t),
+    perguntas, temFileInput: !!fileInput,
+    enviado: /Candidatura enviada|Sua candidatura foi enviada/i.test(t),
+    revisao: /Revise sua candidatura/i.test(t),
+    botoes: [...document.querySelectorAll('button')].map(b => norm(b.innerText)).filter(Boolean).slice(0, 14)
+  });
+})()"""
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--url", required=True)
+    ap.add_argument("--cv", required=True)
+    ap.add_argument("--answers", required=True)
+    ap.add_argument("--submit", action="store_true")
+    ap.add_argument("--cv-fallback", default="",
+                    help="trecho do nome de um CV JA enviado, para usar quando o upload nao "
+                         "for possivel nesta tela (ex.: 'crossing' p/ CV em ingles, 'itlean' p/ pt-BR)")
+    ap.add_argument("--max-steps", type=int, default=6)
+    ap.add_argument("--cv-library-only", action="store_true",
+                    help="NAO seta input[type=file] na tela do form (o handler React do LinkedIn "
+                         "re-abre o picker NATIVO via xdg portal e trava o renderer). Exige que o PDF "
+                         "ja esteja na biblioteca (pre-upload em /jobs/application-settings/); o script "
+                         "apenas seleciona o radio com o nome do --cv.")
+    ap.add_argument("--resume", action="store_true", help="Nao navega pra URL, continua de onde parou (form deve estar aberto)")
+    ap.add_argument("--target", type=int, default=0,
+                    help="indice da aba do CDP a usar (default 0). Sirva para trabalhar numa aba NOVA "
+                         "e deixar um formulario em espera (codigo 6) intacto na aba 0")
+    ap.add_argument("--target-id", default="",
+                    help="ID exato do target CDP (mais seguro que --target: a ordem das abas muda)")
+    a = ap.parse_args()
+    import os
+    # sem isso o script sobe um caminho inexistente e o ATS responde
+    # "erro no upload" — foi exatamente o que aconteceu com o PDF do Crossing
+    # Hurdles, que nunca chegou a ser gerado.
+    if not os.path.isfile(a.cv):
+        print("CV NAO EXISTE: %s" % a.cv)
+        print("Gere o PDF antes de aplicar (build-cv-html.mjs -> generate-pdf.mjs).")
+        return 6
+    answers = json.load(open(a.answers))
+
+    c = cdp_mod.CDP(cdp_mod.port())
+    if a.target_id:
+        c.connect_id(a.target_id)
+    elif a.target:
+        try:
+            c.connect(a.target)
+        except Exception:
+            c.connect(0)
+    else:
+        c.connect()
+
+    def find(regex_src):
+        js = "(" + FIND + ")(" + json.dumps(regex_src) + ")"
+        r = c.eval(js)
+        try:
+            d = json.loads(r)
+        except Exception:
+            return None
+        if "err" in d:
+            return None
+        c.click_at(d["x"], d["y"])
+        return d["label"]
+
+    def state():
+        try:
+            return json.loads(c.eval(STATE))
+        except Exception:
+            return {}
+
+    resume_ok = False
+    if a.resume:
+        st = state()
+        if not st.get("pagina") and not st.get("formAberto"):
+            print(">> --resume mas form nao encontrado. Abrindo do zero...")
+            c.goto(a.url, sleep=3)
+        else:
+            print(">> --resume: form detectado, continuando da pagina", st.get("pagina", "?"))
+            resume_ok = True
+    if not resume_ok:
+        c.goto(a.url, sleep=3)
+    # o sleep fixo nao garante que o React trocou de pagina: a leitura anterior
+    # pegava a pagina velha (foi assim que apareceu um falso "Candidatura enviada"
+    # e botoes de busca em vez de formulario). Poll no id da vaga.
+    m_id = re.search(r"/jobs/view/(\d+)", a.url)
+    if m_id:
+        jid = m_id.group(1)
+        for _ in range(20):
+            cur = c.eval("location.href") or ""
+            if jid in cur:
+                break
+            time.sleep(1)
+        else:
+            print("AVISO: nao confirmei a URL da vaga (id %s)" % jid)
+
+    # Abre o formulario. Duas armadilhas reais: (1) o clique e instavel — render
+    # do LinkedIn chega atrasado; (2) esperar por "tem select/grupo" da falso
+    # positivo, porque fora do formulario a pagina tambem tem o seletor de idioma
+    # no rodape. O unico indicador honesto de "form aberto" e o cabecalho
+    # "N de M paginas", que so existe dentro do formulario.
+    abriu = resume_ok  # em --resume o form ja esta aberto
+    for _tent in range(4):
+        st0 = state()
+        if st0.get("pagina") or st0.get("formAberto"):
+            abriu = True
+            break
+        # O CTA que ABRE o formulario muda de rotulo com a UI (visto em 2026-10):
+        # "Enviar candidatura" na versao nova, "Candidatar-se" ou o selo "Candidatura
+        # simplificada". A ORDEM importa: o selo tambem casa pelo texto, mas clicar
+        # nele nao abre nada — por isso os rotulos exatos vem primeiro e cada um
+        # recebe a sua propria janela de espera.
+        for rotulo in ("^Enviar candidatura$", "^Candidatar-se$",
+                       "Candidatura simplificada|Easy Apply"):
+            if state().get("pagina"):
+                abriu = True
+                break
+            find(rotulo)
+            for _ in range(9):
+                time.sleep(1)
+                stx = state()
+                if stx.get("pagina") or stx.get("formAberto"):
+                    abriu = True
+                    break
+        if abriu:
+            break
+        c.goto(a.url, sleep=6)
+    if not abriu:
+        st = state()
+        print("NAO ABRIU O FORMULARIO — ja aplicou, vaga fechada ou sem Easy Apply")
+        print("  enviado_na_pagina:", st.get("enviado"), "| botoes:", st.get("botoes"))
+        return 2
+
+    for step in range(1, a.max_steps + 1):
+        st = state()
+        print("--- passo %d: pagina %s | enviado=%s | revisao=%s" % (step, st.get("pagina"), st.get("enviado"), st.get("revisao")))
+        if st.get("enviado"):
+            print("STATUS: CANDIDATURA ENVIADA (confirmado pelo LinkedIn)")
+            return 0
+        if st.get("revisao"):
+            print("revisao final — respostas que estao no formulario:")
+            for q in st.get("perguntas", []):
+                print("   - %s = %r" % (q["pergunta"][:95], q["valor"]))
+            # TRAVA anti-CV-errado: o LinkedIn REAPROVEITA o PDF da candidatura anterior
+            # quando o upload falha. Em 06/10 a Ademicon ia com o CV da Crossing (EN).
+            js_pdf = ("(() => { const t = (document.body.innerText||'');"
+                      " const m = t.match(/[A-Za-z0-9._-]+\\.pdf/g) || [];"
+                      " return JSON.stringify([...new Set(m)]); })()")
+            try:
+                anexados = json.loads(c.eval(js_pdf) or "[]")
+            except Exception as e:
+                anexados = ["<erro lendo: %s>" % str(e)[:40]]
+            esperado = os.path.basename(a.cv)
+            if esperado not in anexados:
+                # o LinkedIn mantem o PDF da candidatura ANTERIOR selecionado. Aqui o
+                # input[type=file] existe, entao da para corrigir sem clique nenhum.
+                print("   cv anexado errado (%s) -> setando o correto na revisao" % (anexados,))
+                try:
+                    print("     ", c.upload("input[type=file]", a.cv))
+                    time.sleep(6)
+                    anexados = json.loads(c.eval(js_pdf) or "[]")
+                except Exception as e:
+                    print("      falhou:", str(e)[:100])
+                if esperado not in anexados and a.cv_fallback:
+                    # esta tela nao oferece input[type=file]: so da para ESCOLHER um CV
+                    # que o LinkedIn ja conhece. Selecionar o radio por .click() do input
+                    # funciona; clique por coordenada NAO (input customizado).
+                    print("     fallback:", c.eval(TPL_RESUME.replace("__FALLBACK__", a.cv_fallback.lower())))
+                    time.sleep(4)
+                    anexados = json.loads(c.eval(js_pdf) or "[]")
+                    if any(a.cv_fallback.lower() in str(x).lower() for x in anexados):
+                        esperado = next(x for x in anexados if a.cv_fallback.lower() in str(x).lower())
+                        print("     AVISO: indo com o CV ja enviado '%s' — o tailor-made nao "
+                              "pode subir nesta tela" % esperado)
+            print("   cv anexado:", anexados, "| esperado:", esperado)
+            if esperado not in anexados:
+                print("   >>> ABORTADO: o envio iria com o CV ERRADO (%s)." % (anexados,))
+                print("   >>> corrija com: cdp upload 'input[type=file]' %s  e rode de novo sem --submit" % a.cv)
+                return 4
+            if a.submit:
+                lbl = find("^Enviar candidatura$|^Submit application$")
+                print("   submit:", lbl)
+                # o botao de envio do LinkedIn e React: clique sintetico por coordenada
+                # NAO dispara o onClick (funciona em input nativo, nao em <button>).
+                # Portanto: clique real via JS depois de rolar ate ele.
+                js = ("(() => { const n = s => (s||'').replace(/\\s+/g,' ').trim();"
+                      " const b = [...document.querySelectorAll('button')].find(x =>"
+                      " /^(Enviar candidatura|Submit application)$/i.test(n(x.innerText||'')));"
+                      " if (!b) return 'sem botao (ja enviado?)';"
+                      " b.scrollIntoView({block:'center'}); b.focus(); b.click(); return 'clicou'; })()")
+                print("   submit js:", c.eval(js))
+                time.sleep(8)
+                st2 = state()
+                ok = bool(st2.get("enviado"))
+                print("STATUS FINAL:", "ENVIADA" if ok else "NAO CONFIRMADO")
+                if not ok:
+                    print("   pagina:", st2.get("pagina"), "| botoes:", st2.get("botoes"))
+                return 0 if ok else 1
+            print("(dry-run: nao enviei)")
+            return 0
+
+        # Variante de UMA pagina: contato + lista de CVs + "Enviar candidatura", sem
+        # cabecalho "N de M paginas". Nao existe botao de avancar aqui — o proprio
+        # CTA de envio e o submit. Sem este ramo o loop clicava em "avancar" inexistente
+        # ate estourar max_steps (visto em INDI x2 e GeorgiaTEK, 2026-10-07).
+        if st.get("formAberto") and not st.get("pagina"):
+            if not a.submit:
+                print("(dry-run: pagina unica, nao enviei)")
+                return 0
+            lbl = find("^Enviar candidatura$|^Submit application$")
+            print("   pagina unica — submit:", lbl)
+            time.sleep(7)
+            st2 = state()
+            ok = bool(st2.get("enviado"))
+            print("STATUS FINAL:", "ENVIADA" if ok else "NAO CONFIRMADO")
+            if not ok:
+                print("   botoes:", st2.get("botoes"))
+            return 0 if ok else 1
+
+        # pagina de curriculo.
+        # 2026-10-12 (corrige o veredito de 07/10): "Carregar curriculo" AQUI cria
+        # o input[type=file] — DESDE QUE o file chooser nativo esteja INTERCEPTADO
+        # antes do clique. Sem interceptacao o dialog nativo abre e trava o renderer
+        # para sempre (TimeoutError em tudo). Com Page.setInterceptFileChooserDialog
+        # o dialog NAO abre, o input aparece no DOM, e DOM.setFileInputFiles sobe o
+        # PDF tailor-made. Sem isso o envio ia com o PDF mais recente da biblioteca.
+        pg = st.get("pagina") or ""
+        if st.get("curriculo") or pg.startswith("2"):
+            # 2026-10-17: --cv-library-only evita o setFileInputFiles na tela do form.
+            # Nesta sessao (Chromium wayland + xdg-desktop-portal) o handler React
+            # re-abre o picker nativo e o renderer inteiro trava. O PDF ja foi
+            # pre-carregado na biblioteca; aqui so escolhemos o radio pelo nome.
+            _up = ""
+            if a.cv_library_only:
+                print("   upload (pagina do CV): PULADO (--cv-library-only; CV vem da biblioteca)")
+            else:
+                try:
+                    c.send("Page.enable")
+                    c.send("Page.setInterceptFileChooserDialog", {"enabled": True})
+                except Exception as e:
+                    print("   (aviso: nao ligou interceptacao do chooser):", str(e)[:80])
+                _up = c.upload("input[type=file]", a.cv)
+                try:
+                    # drena o evento fileChooserOpened, se o React tiver re-disparado
+                    c.file_chooser_node(timeout=0.6)
+                except Exception:
+                    pass
+                if "nao achou" in _up:
+                    try:
+                        c.send("Page.enable")
+                        c.send("Page.setInterceptFileChooserDialog", {"enabled": True})
+                        find("^Carregar curr[ií]culo$")
+                        time.sleep(2.0)
+                        _up = c.upload("input[type=file]", a.cv)
+                    except Exception as e:
+                        _up = "falhou no clique+upload: %s" % str(e)[:90]
+                print("   upload (pagina do CV):", _up)
+                if "setado" in _up:
+                    print("   NOTA: CV tailor-made subiu (nao usa mais o fallback da biblioteca)")
+            # O perfil tem VARIOS CVs e a pagina do curriculo lista todos como radios
+            # (aria-label = nome do PDF). Sem escolher, o LinkedIn mantem o PDF da
+            # candidatura ANTERIOR e o envio ia com o CV errado (Ademicon/Outly,
+            # 2026-10-08). input.click() registra no React; clique por coordenada nao.
+            _sel_cv = ("(() => { const rs = [...document.querySelectorAll('input[type=radio]')];"
+                       " const r = rs.find(x => (((x.getAttribute('aria-label')||'') + ' ' +"
+                       " (x.value||'')).toLowerCase()).includes('__SUB__'));"
+                       " if (!r) return ''; if (r.checked) return 'ja-selecionado';"
+                       " r.click(); return 'selecionado:' + (r.getAttribute('aria-label')||''); })()")
+            # 2026-10-17: o LinkedIn indexa o PDF recem-enviado na lista de radios de
+            # forma ASSINCRONA. Consultar uma unica vez logo apos o upload fazia o
+            # script cair no --cv-fallback (CV da biblioteca) e enviar o PDF errado
+            # (visto na Insight Global, vaga 4479153457). Espera ativa: ate ~15s pelo
+            # radio do CV tailor-made antes de considerar fallback.
+            _r = ""
+            if "setado" in _up:
+                for _try in range(15):
+                    _r = c.eval(_sel_cv.replace("__SUB__", os.path.basename(a.cv).lower()))
+                    if _r:
+                        break
+                    time.sleep(1.0)
+            if not _r:
+                _r = c.eval(_sel_cv.replace("__SUB__", os.path.basename(a.cv).lower()))
+            if not _r and a.cv_fallback:
+                _r = c.eval(_sel_cv.replace("__SUB__", a.cv_fallback.lower()))
+            if _r:
+                print("   cv escolhido:", _r)
+                time.sleep(2.5)
+
+        pendentes = []
+        for ck in st.get("checks", []) or []:
+            hit = answers.get("check:%d" % ck["i"])
+            if hit is None:
+                hit = next((v for k, v in answers.items() if k.lower() in (ck.get("pergunta") or "").lower()), None)
+            if hit is None:
+                continue
+            querer = str(hit).strip().lower() in ("yes", "sim", "true", "1", "s")
+            if querer == bool(ck.get("marcado")):
+                continue
+            js = "(() => { const c = [...document.querySelectorAll('input[type=checkbox]')]"
+            js += "[%d]; if (!c) return 'sem checkbox'; c.scrollIntoView({block:'center'});" % ck["i"]
+            js += " const r = c.getBoundingClientRect(); return JSON.stringify({x: Math.round(r.left+r.width/2), y: Math.round(r.top+r.height/2)}); })()"
+            res = c.eval(js)
+            try:
+                co = json.loads(res)
+                c.click_at(co["x"], co["y"])
+                print("   checkbox [%s] -> %s" % ((ck.get("pergunta") or "")[:52], "marcado" if querer else "desmarcado"))
+            except Exception:
+                print("   checkbox falhou:", str(res)[:120])
+            time.sleep(1.0)
+
+        for sl in st.get("selects", []) or []:
+            pergunta = sl.get("pergunta") or ""
+            if sl.get("value"):
+                continue  # select ja preenchido pelo LinkedIn
+            # chave por indice tem prioridade: os selects de mes/ano da formacao
+            # nao tem rotulo que os diferencie (dois "Mes", dois "Ano" vazios)
+            opcs = {(o or "").strip() for o in (sl.get("opcoes") or [])}
+            eh_ingles = {"None", "Conversational", "Professional"} <= opcs
+            if not eh_ingles:
+                # segundo conjunto de opcoes visto (2026-10-08, CI&T): a descricao
+                # do nivel vem embutida na opcao (Basic. / Intermediate I. / ...).
+                eh_ingles = any(o.startswith("Proficient") for o in opcs) and any(o.startswith("Basic") for o in opcs)
+            hit = answers.get("select:%d" % sl["i"])
+            if hit is None and eh_ingles:
+                # Select de nivel de ingles: decidido ANTES de qualquer match generico —
+                # antes, a chave "english": "Yes" casava aqui e virava "opcao nao achou",
+                # travando o formulario. Ancorado na autoavaliacao dele: compreensao/leitura
+                # quase nativa, conversacao profissional (nunca "Native"/"Proficient", que
+                # implicam liderar discussoes e negociar).
+                hit = "Professional" if "Professional" in opcs else "Advanced"
+            if hit is None:
+                # chave MAIS LONGA que casa vence: uma chave curta e generica ("pj")
+                # casava antes de uma especifica ("pretensao salarial para o modelo pj")
+                # e respondia "Sim" onde o campo esperava um numero (visto no Ademicon,
+                # 2026-10-08).
+                _c = [(len(k), v) for k, v in answers.items() if k.lower() in pergunta.lower()]
+                hit = max(_c)[1] if _c else None
+            if hit is None:
+                # consentimento LGPD/GDPR: aceitar e o default correto — enviar a
+                # candidatura JA e o consentimento no tratamento dos dados.
+                aceita = next((o for o in (sl.get("opcoes") or [])
+                               if re.match(r"^\s*(li e aceito|aceito|concordo|sim,? aceito|i accept|i agree)",
+                                           (o or "").strip(), re.I)), None)
+                if aceita:
+                    hit = aceita
+            if hit is None:
+                if not sl.get("obrigatorio"):
+                    print("   select opcional sem resposta, pulando [%s]" % pergunta[:50])
+                    continue
+                pendentes.append("SELECT: " + pergunta + " [opcoes: " + " | ".join(sl.get("opcoes", [])[:8]) + "]")
+                continue
+            js = TPL_SELECT.replace("__IDX__", str(sl["i"])).replace("__TARGET__", str(hit))
+            res = c.eval(js)
+            try:
+                ok = json.loads(res)
+                print("   select [%s] = %r" % (pergunta[:55], ok.get("escolhido") or ok))
+            except Exception:
+                print("   select falhou:", str(res)[:140])
+            time.sleep(1.0)
+
+        for g in (st.get("grupos") or {}).values():
+            if g.get("respondido"):
+                continue
+            # radio aceita valor sim/nao (mapeado para as opcoes Yes/No) OU o texto
+            # EXATO de uma das opcoes — grupos de ESCALA (ex.: CI&T/AWS 2026-10-08:
+            # "Você já teve contato com AWS? Se sim, qual nível?" -> "Não tive contato")
+            # nao tem valor booleano. Chave numerica ("typescript": "5") continua fora:
+            # o alvo nao existe entre as opcoes e o radio travava o form.
+            _opts = [(o.get("label") or "").strip().lower() for o in g["opcoes"]]
+            hit = next((v for k, v in answers.items()
+                        if k.lower() in g["pergunta"].lower()
+                        and (str(v).strip().lower() in ("yes", "no", "sim", "nao", "não", "true", "false")
+                             or str(v).strip().lower() in _opts)), None)
+            if hit is not None:
+                # a pergunta pode estar em pt e as OPCOES em ingles (ou vice-versa):
+                # visto no IT Singular ("PJ em modelo remoto?" com opcoes yes/no).
+                _n = str(hit).strip().lower()
+                hit = {"sim": "Yes", "s": "Yes", "true": "Yes", "yes": "Yes",
+                       "não": "No", "nao": "No", "n": "No", "false": "No", "no": "No"}.get(_n, hit)
+            if hit is None:
+                if _e_chrome(g["pergunta"]):
+                    continue
+                opcoes = " | ".join(o["label"] for o in g["opcoes"])
+                pendentes.append(("SEM_RESPOSTA", g["pergunta"], opcoes))
+                continue
+            js = TPL_RADIO.replace("__NAME__", g["name"]).replace("__TARGET__", str(hit))
+            res = c.eval(js)
+            try:
+                co = json.loads(res)
+                c.click_at(co["x"], co["y"])
+                print("   radio [%s] = %r" % (g["pergunta"][:55], hit))
+            except Exception:
+                print("   radio falhou:", str(res)[:140])
+            time.sleep(1.2)
+
+        for q in st.get("perguntas", []):
+            if q["valor"]:
+                continue
+            # chave por indice tem prioridade (campos sem rotulo legivel)
+            hit = answers.get("text:%d" % q["i"])
+            if hit is None:
+                # chave MAIS LONGA que casa vence (ver comentario no bloco de selects)
+                _c = [(len(k), v) for k, v in answers.items() if k.lower() in q["pergunta"].lower()]
+                hit = max(_c)[1] if _c else None
+            if hit is None:
+                if _e_chrome(q["pergunta"]):
+                    continue  # navbar/rodape do LinkedIn, nao e pergunta
+                if _e_opcional(q["pergunta"]):
+                    print("   campo opcional, pulando [%s]" % q["pergunta"][:55])
+                    continue
+                pendentes.append(q["pergunta"])
+                continue
+            js = """(() => { const el = document.querySelector('[data-ea-idx="%d"]') || [...document.querySelectorAll('input:not([type]), input[type=text], textarea')][%d];
+                if (!el) return 'sem campo';
+                const s = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set;
+                s.call(el, ''); el.dispatchEvent(new Event('input',{bubbles:true})); el.focus(); return 'ok'; })()""" % (q["i"], q["i"])
+            c.eval(js)
+            c.send("Input.insertText", {"text": str(hit)})
+            print("   preenchi [%s] = %r" % (q["pergunta"][:60], hit))
+            time.sleep(0.8)
+            # campo typeahead (ex.: "Location (city)"): digitar o texto NAO basta — o
+            # LinkedIn so valida se a sugestao for escolhida da lista, e sem isso o
+            # form nunca avanca (visto no Mindbody/Greenhouse, 2026-10-08). Clica a 1a.
+            sug = c.eval("(() => { const o = document.querySelector('[role=option]'); if (!o) return ''; o.click(); return JSON.stringify({txt: (o.innerText || '').slice(0, 60)}); })()")
+            try:
+                sj = json.loads(sug)
+                if sj.get("txt"):
+                    print("   sugestao escolhida:", sj["txt"])
+            except Exception:
+                pass
+            time.sleep(0.5)
+
+        if pendentes:
+            # 2026-10-12: NAO fecha o form. So reporta perguntas sem resposta
+            # e sai com codigo 6 (WAITING_FOR_INPUT). O form continua aberto
+            # no navegador pra resposta ser adicionada e o script continuar.
+            needs_input = False
+            for p in pendentes:
+                if isinstance(p, tuple) and p[0] == "SEM_RESPOSTA":
+                    print("   ? [radio: %s]  %s" % (p[2][:120], p[1][:70]))
+                    needs_input = True
+                elif isinstance(p, tuple) and p[0] == "CHECK_SEM_RESPOSTA":
+                    print("   ? [check] %s" % p[1][:120])
+                    needs_input = True
+                else:
+                    print("   ?", str(p)[:130])
+                    needs_input = True
+            if needs_input:
+                print("⚠ FORMULARIO EM ESPERA — respostas necessarias acima.")
+                print("  Adicione as respostas em config/answers-hermes.json e")
+                print("  rode novamente com --resume para continuar de onde parou.")
+                return 6  # WAITING_FOR_INPUT — form fica aberto!
+
+        lbl = find("^Avançar$|^Avaliar$|^Próximo$|^Next$|^Continuar$")
+        if not lbl:
+            st2 = state()
+            print("SEM BOTAO DE AVANCO | botoes:", st2.get("botoes"))
+            return 4
+        print("   avanco:", lbl)
+        time.sleep(3.5)
+
+    print("limite de passos atingido")
+    return 5
+
+
+if __name__ == "__main__":
+    sys.exit(main())

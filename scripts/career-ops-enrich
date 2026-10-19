@@ -1,0 +1,119 @@
+#!/usr/bin/env node
+// career-ops-enrich — enrich the pool TSV with title/company/location + full JD text.
+//
+// Why: the pool collector enumerates LinkedIn's virtualized job list by
+// li[data-occludable-job-id], which yields all 25 cards/page as IDs but an
+// EMPTY innerText for the cards that never rendered — so ~78% of the TSV has no
+// title. The public guest endpoint
+//   https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/<id>
+// returns the real posting card (title, company, location, workplace type) and
+// the full JD markup, no auth needed. One cheap HTTP GET per id replaces a
+// browser navigation per id.
+//
+// Usage: career-ops-enrich [pool-YYYY-MM-DD.tsv] [--concurrency 6]
+import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { join } from 'node:path';
+import { DATA_DIR, assertNotUpstream } from './lib/paths.mjs';
+
+const today = new Date().toISOString().slice(0, 10);
+const args = process.argv.slice(2);
+const ci = args.indexOf('--concurrency');
+const CONC = ci >= 0 ? parseInt(args[ci + 1], 10) || 6 : 6;
+const di = args.indexOf('--delay');
+const DELAY = di >= 0 ? parseInt(args[di + 1], 10) || 0 : 0;
+const skipExisting = args.includes('--skip-existing');
+const tsv = args.find(a => !a.startsWith('--') && /\.tsv$/.test(a)) || `${DATA_DIR}/pool-${today}.tsv`;
+if (!existsSync(tsv)) { console.error(`pool not found: ${tsv}`); process.exit(2); }
+
+const dateTag = (tsv.match(/pool-(\d{4}-\d{2}-\d{2})\.tsv/) || [])[1] || today;
+const jdDir = join(DATA_DIR, `jd-${dateTag}`);
+const outPath = `${tsv.replace(/\.tsv$/, '')}-enriched.tsv`;
+assertNotUpstream(jdDir, 'write JD files');
+assertNotUpstream(outPath, 'write enriched pool');
+mkdirSync(jdDir, { recursive: true });
+
+const strip = (h) => (h || '')
+  .replace(/<br\s*\/?>/gi, '\n')
+  .replace(/<\/(p|li|div|ul|ol|h\d)>/gi, '\n')
+  .replace(/<li[^>]*>/gi, '- ')
+  .replace(/<[^>]+>/g, '')
+  .replace(/&nbsp;/g, ' ')
+  .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+  .replace(/&#39;/g, "'").replace(/&quot;/g, '"')
+  .replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n')
+  .replace(/[ \t]{2,}/g, ' ')
+  .trim();
+
+const first = (html, re) => { const m = html.match(re); return m ? strip(m[1]) : ''; };
+
+async function one(id) {
+  if (DELAY) await new Promise(r => setTimeout(r, DELAY));
+  const url = `https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/${id}`;
+  try {
+    const r = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36',
+        'Accept-Language': 'pt-BR,pt;q=0.9,en;q=0.8',
+      },
+      signal: AbortSignal.timeout(20000),
+    });
+    if (!r.ok) return { id, error: `http ${r.status}` };
+    const html = await r.text();
+    const title = first(html, /class="[^"]*topcard__title[^"]*"[^>]*>([\s\S]*?)<\/h2>/);
+    const company = first(html, /class="[^"]*topcard__org-name-link[^"]*"[^>]*>([\s\S]*?)<\/a>/);
+    const loc = first(html, /class="[^"]*topcard__flavor topcard__flavor--bullet[^"]*"[^>]*>([\s\S]*?)<\/span>/);
+    const crit = first(html, /class="[^"]*description__job-criteria-subheader[^"]*"[^>]*>\s*(?:Remoto|Remote|Híbrido|Hybrid|Presencial|On-site)/i);
+    const critBlocks = [...html.matchAll(/description__job-criteria-subheader[^>]*>([\s\S]*?)<\/h3>[\s\S]*?description__job-criteria-text[^>]*>([\s\S]*?)<\/span>/g)]
+      .map(m => `${strip(m[1])}: ${strip(m[2])}`);
+    const descHtml = (html.match(/class="[^"]*show-more-less-html__markup[^"]*"[^>]*>([\s\S]*?)<\/div>/) || [])[1] || '';
+    const desc = strip(descHtml);
+    const isRemote = /remoto|remote|home office|100% remote|teletrabalho/i.test(`${loc} ${critBlocks.join(' ')}`);
+    writeFileSync(join(jdDir, `${id}.txt`), `# ${title} @ ${company}\n# ${loc}\n# ${critBlocks.join(' | ')}\n# url: https://www.linkedin.com/jobs/view/${id}/\n\n${desc}\n`, 'utf-8');
+    return { id, title, company, loc, workplace: crit, isRemote, descLen: desc.length };
+  } catch (e) {
+    return { id, error: String(e.message || e).slice(0, 60) };
+  }
+}
+
+const ids = readFileSync(tsv, 'utf-8').split('\n').slice(1).map(l => l.split('\t')[0]).filter(x => /^\d+$/.test(x))
+  .filter(id => !(skipExisting && existsSync(join(jdDir, `${id}.txt`))));
+console.log(`enriching ${ids.length} ids (concurrency ${CONC}, delay ${DELAY}ms) -> ${jdDir}`);
+
+const results = [];
+let done = 0;
+const queue = [...ids];
+async function worker() {
+  while (queue.length) {
+    const id = queue.shift();
+    const res = await one(id);
+    results.push(res);
+    done++;
+    if (done % 25 === 0) console.log(`  ${done}/${ids.length}`);
+  }
+}
+await Promise.all(Array.from({ length: CONC }, worker));
+
+const order = new Map(ids.map((id, i) => [id, i]));
+results.sort((a, b) => order.get(a.id) - order.get(b.id));
+const esc = (s) => (s || '').replace(/[\t\n\r]+/g, ' ').trim();
+
+// merge: keep previously-enriched rows that this run skipped
+const prev = new Map();
+if (existsSync(outPath)) {
+  for (const line of readFileSync(outPath, 'utf-8').split('\n').slice(1)) {
+    if (!line.trim()) continue;
+    const c = line.split('\t');
+    if (/^\d+$/.test(c[0])) prev.set(c[0], line);
+  }
+}
+const merged = new Map(prev);
+for (const r of results) {
+  merged.set(r.id, [r.id, esc(r.title), esc(r.company), esc(r.loc), esc(r.workplace), r.isRemote ? 'yes' : 'no', r.descLen || 0, esc(r.error)].join('\t'));
+}
+const allIds = readFileSync(tsv, 'utf-8').split('\n').slice(1).map(l => l.split('\t')[0]).filter(x => /^\d+$/.test(x));
+const out = ['id\ttitle\tcompany\tlocation\tworkplace\tis_remote\tdesc_len\terror'];
+for (const id of allIds) if (merged.has(id)) out.push(merged.get(id));
+writeFileSync(outPath, out.join('\n') + '\n', 'utf-8');
+const ok = [...merged.values()].filter(l => l.split('\t')[7] === '').length;
+console.log(`ok no total: ${ok}/${allIds.length} | novos ok nesta rodada: ${results.filter(r => !r.error).length} | erros nesta rodada: ${results.filter(r => r.error).length}`);
+console.log(`enriched: ${outPath}`);

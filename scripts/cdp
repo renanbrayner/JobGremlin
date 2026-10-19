@@ -1,0 +1,266 @@
+#!/usr/bin/env python3
+"""cdp — dirige o Chromium de perfil dedicado via DevTools Protocol (só stdlib).
+
+Uso:
+  cdp tabs                      lista abas
+  cdp title                     titulo da aba ativa
+  cdp goto <url> [--sleep N]    navega e espera N segundos (para SPA renderizar)
+  cdp eval <js>                 avalia JS na aba ativa, imprime o retorno
+  cdp click <x> <y>             clique REAL (Input.dispatchMouseEvent) por coordenada
+  cdp click-js <path.js>        acha o elemento pelo JS e clica no centro dele
+  cdp eval-file <path.js>       idem, com o JS vindo de arquivo (evita aspas)
+  cdp shot <path.png>           screenshot
+
+Porta: $CDP_PORT, ou /tmp/career-ops-browser-port, ou 9333.
+"""
+import base64, json, re, secrets, socket, struct, sys, time, urllib.request
+
+def port():
+    import os
+    if os.environ.get("CDP_PORT"):
+        return int(os.environ["CDP_PORT"])
+    try:
+        return int(open("/tmp/career-ops-browser-port").read().strip())
+    except Exception:
+        return 9333
+
+class CDP:
+    def __init__(self, port):
+        self.port = port; self.sock = None; self._id = 0
+    def list_targets(self):
+        return json.loads(urllib.request.urlopen(f"http://127.0.0.1:{self.port}/json").read())
+    def connect(self, index=0):
+        pages = [t for t in self.list_targets() if t.get("type") == "page"]
+        if not pages: raise RuntimeError("nenhuma aba do tipo page")
+        return self._open(pages[index])
+    def connect_id(self, target_id):
+        """Conecta numa aba pelo ID exato do target.
+
+        Necessario porque a ORDEM de /json/list muda conforme a aba ativada:
+        index-based targeting em sessao com varias abas pode acabar navegando
+        a aba errada (e destruindo um formulario em espera).
+        """
+        pages = [t for t in self.list_targets() if t.get("type") == "page"]
+        t = next((p for p in pages if p.get("id") == target_id), None)
+        if not t:
+            raise RuntimeError("target %s nao encontrado (abas: %s)"
+                               % (target_id, [p.get("id") for p in pages]))
+        return self._open(t)
+    def _open(self, t):
+        m = re.match(r"ws://([^:/]+):(\d+)(/.+)", t["webSocketDebuggerUrl"])
+        s = socket.create_connection((m.group(1), int(m.group(2))))
+        key = base64.b64encode(secrets.token_bytes(16)).decode()
+        s.send((f"GET {m.group(3)} HTTP/1.1\r\nHost: {m.group(1)}:{m.group(2)}\r\n"
+                f"Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {key}\r\n"
+                "Sec-WebSocket-Version: 13\r\n\r\n").encode())
+        buf = b""
+        while b"\r\n\r\n" not in buf: buf += s.recv(4096)
+        if b"101" not in buf: raise RuntimeError(f"handshake falhou: {buf[:120]!r}")
+        self.sock = s
+        self.send("Page.enable"); self.send("Runtime.enable")
+        return t
+    def _send_frame(self, payload, opcode=0x1):
+        data = payload.encode() if isinstance(payload, str) else payload
+        hdr = bytes([0x80 | opcode]); L = len(data)
+        mk = secrets.token_bytes(4)
+        if L < 126: hdr += bytes([0x80 | L])
+        elif L < 65536: hdr += bytes([0x80 | 126]) + struct.pack(">H", L)
+        else: hdr += bytes([0x80 | 127]) + struct.pack(">Q", L)
+        self.sock.send(hdr + mk + bytes(data[i] ^ mk[i % 4] for i in range(L)))
+    def _recv_frame(self):
+        """Le UMA mensagem WebSocket, remontando fragmentos.
+
+        Antes esta funcao ignorava o opcode e devolvia cada FRAME como se fosse
+        uma mensagem. Uma resposta grande (DOM.getDocument com profundidade
+        total, por exemplo) o Chromium manda FRAGMENTADA: o primeiro fragmento
+        vem com FIN=0 e os seguintes com opcode 0x0 (continuation). Lendo so o
+        primeiro, o resto era interpretado como a proxima mensagem, o socket
+        dessincronizava e TODO comando seguinte morria com TimeoutError dentro
+        de recv — que parece "renderer pendurado" mas e o cliente fora de fase.
+        """
+        def recvn(n):
+            out = b""
+            while len(out) < n:
+                chunk = self.sock.recv(n - len(out))
+                if not chunk:
+                    raise ConnectionError("socket fechado pelo browser")
+                out += chunk
+            return out
+        data = b""
+        while True:
+            b1 = recvn(1)[0]
+            fin, opcode = b1 & 0x80, b1 & 0x0F
+            b2 = recvn(1)[0]
+            L = b2 & 0x7F
+            if L == 126: L = struct.unpack(">H", recvn(2))[0]
+            elif L == 127: L = struct.unpack(">Q", recvn(8))[0]
+            payload = recvn(L)
+            if opcode == 0x9:                      # ping -> responde pong
+                self._send_frame(payload, opcode=0xA)
+                continue
+            if opcode == 0xA:                      # pong -> ignora
+                continue
+            if opcode == 0x8:                      # close
+                raise ConnectionError("browser enviou close frame")
+            data += payload
+            if fin:
+                return data.decode("utf-8", "replace")
+    def send(self, method, params=None, timeout=30.0):
+        self._id += 1; mid = self._id
+        self._send_frame(json.dumps({"id": mid, "method": method, "params": params or {}}))
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            self.sock.settimeout(max(0.1, deadline - time.time()))
+            msg = json.loads(self._recv_frame())
+            if msg.get("id") == mid: return msg
+        raise TimeoutError(method)
+    def rect_of(self, js_finder):
+        """JS que retorna {x,y} do centro do elemento alvo."""
+        return json.loads(self.eval(js_finder) or "{}")
+    def click_at(self, x, y):
+        """Clique REAL (Input.dispatchMouseEvent) — .click() sintético não acorda o React do LinkedIn."""
+        for t in ("mouseMoved", "mousePressed", "mouseReleased"):
+            self.send("Input.dispatchMouseEvent", {
+                "type": t, "x": float(x), "y": float(y),
+                "button": "left", "buttons": 1 if t != "mouseReleased" else 0, "clickCount": 1
+            })
+    def click_js(self, js_finder):
+        r = self.rect_of(js_finder)
+        if not r.get("x") and r.get("x") != 0:
+            return f"nao-achou: {json.dumps(r)[:200]}"
+        self.click_at(r["x"], r["y"])
+        return f"clique real em ({r['x']},{r['y']}) label={r.get('label','')!r}"
+    def eval(self, js, timeout=30.0):
+        r = self.send("Runtime.evaluate",
+                      {"expression": js, "returnByValue": True, "awaitPromise": True}, timeout=timeout)
+        res = r.get("result", {})
+        if "exceptionDetails" in res:
+            return f"__JS_ERROR__ {res['exceptionDetails'].get('text')} {res.get('exception',{}).get('description','')[:300]}"
+        return res.get("result", {}).get("value")
+    def goto(self, url, sleep=0.0):
+        self.send("Page.navigate", {"url": url})
+        for _ in range(40):
+            r = self.send("Runtime.evaluate", {"expression": "document.readyState", "returnByValue": True}, timeout=3)
+            if r["result"]["result"].get("value") == "complete": break
+            time.sleep(0.25)
+        if sleep: time.sleep(sleep)
+    def upload(self, selector, path):
+        """Seta arquivo em input[type=file] SEM abrir dialogo nativo (DOM.setFileInputFiles).
+
+        depth=0 no DOM.getDocument de proposito: com depth=-1 o browser monta e
+        serializa a arvore INTEIRA (na pagina do Easy Apply do LinkedIn sao
+        dezenas de milhares de nos). A resposta voltava fragmentada em varios
+        frames e o socket dessincronizava — todo comando seguinte estourava
+        TimeoutError e a pagina ficava inalcancavel ate fechar a aba (visto
+        06/10, 07/10 e 15/10, sempre no mesmo ponto da pagina do CV).
+        DOM.querySelector busca na subarvore inteira mesmo com a raiz rasa, e e
+        justamente para isso que ele existe.
+        """
+        self.send("DOM.enable")
+        root = self.send("DOM.getDocument", {"depth": 0})["result"]["root"]["nodeId"]
+        node = self.send("DOM.querySelector", {"nodeId": root, "selector": selector})["result"]["nodeId"]
+        if not node:
+            return f"seletor nao achou: {selector}"
+        self.send("DOM.setFileInputFiles", {"files": [path], "nodeId": node})
+        return f"arquivo setado: {path}"
+
+    def file_chooser_node(self, timeout=8.0):
+        """Espera o evento Page.fileChooserOpened e devolve o backendNodeId.
+
+        Usar SOMENTE com setInterceptFileChooserDialog(enabled=True): nesse modo o
+        dialog nativo NAO abre (se abrir, ele bloqueia a JS thread do renderer e todo
+        Runtime.evaluate seguinte pendura -> TimeoutError no socket, ver 2026-10-06).
+        """
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            self.sock.settimeout(max(0.2, deadline - time.time()))
+            try:
+                f = self._recv_frame()
+            except (socket.timeout, TimeoutError):
+                continue
+            try:
+                msg = json.loads(f)
+            except Exception:
+                continue
+            if msg.get("method") == "Page.fileChooserOpened":
+                return msg.get("params", {}).get("backendNodeId")
+        return None
+
+    def upload_interceptado(self, path, timeout=8.0):
+        """Upload sem abrir picker: depende de o chooser JA ter sido disparado
+        (clique em 'Carregar curriculo') com a interceptacao ligada."""
+        self.send("DOM.enable")
+        bn = self.file_chooser_node(timeout=timeout)
+        if not bn:
+            return "sem evento de file chooser (interceptacao ligada? cliquei em Carregar curriculo?)"
+        self.send("DOM.setFileInputFiles", {"files": [path], "backendNodeId": bn})
+        return f"arquivo setado (chooser interceptado): {path}"
+
+    def upload_via_botao(self, path, btn_text="Carregar curr", timeout=10.0):
+        """Liga a interceptacao do file chooser, clica no botao que o abre
+        (ex.: 'Carregar curriculo') e seta o arquivo SEM abrir o dialog nativo
+        — o dialog bloqueia a JS thread do renderer e pendura o socket (2026-10-06).
+        Serve para os formularios de ATS externo (Greenhouse etc.) que TEM upload
+        de CV proprio, diferente do Easy Apply nativo que so deixa escolher da
+        biblioteca do LinkedIn."""
+        self.send("Page.enable")
+        self.send("Page.setInterceptFileChooserDialog", {"enabled": True})
+        js = ("(() => {const re=new RegExp(" + json.dumps(btn_text) + ",'i');"
+              "const b=[...document.querySelectorAll('button,label,a,div[role=button],[role=button]')]"
+              ".find(e=>re.test((e.innerText||'').replace(/\\s+/g,' ').trim()));"
+              "if(!b)return 'BOTAO_NAO_ACHOU'; b.scrollIntoView({block:'center'}); b.click(); return 'CLICADO';})()")
+        r = self.eval(js)
+        bn = self.file_chooser_node(timeout=timeout)
+        if not bn:
+            return "sem file chooser (eval=%s)" % r
+        self.send("DOM.enable")
+        self.send("DOM.setFileInputFiles", {"files": [path], "backendNodeId": bn})
+        return "arquivo setado via botao: %s" % path
+
+    def type_text(self, text):
+        """Input.insertText — dispara eventos reais, o React registra (setar .value nao registra)."""
+        self.send("Input.insertText", {"text": text})
+        return f"digitado: {text!r}"
+
+    def shot(self, path):
+        d = self.send("Page.captureScreenshot", {"format": "png"})["result"]["data"]
+        open(path, "wb").write(base64.b64decode(d))
+    def close(self):
+        if self.sock: self.sock.close(); self.sock = None
+
+def main():
+    a = sys.argv[1:]
+    if not a: print(__doc__); return 1
+    cmd = a[0]
+    if cmd == "tabs":
+        for t in CDP(port()).list_targets():
+            print(f"{t.get('type'):10} | {(t.get('title') or '')[:60]:60} | {(t.get('url') or '')[:80]}")
+        return 0
+    c = CDP(port())
+    try:
+        t = c.connect()
+        if cmd == "title": print(f"{t.get('title')} | {t.get('url')}")
+        elif cmd == "goto":
+            sleep = 0.0
+            if "--sleep" in a: sleep = float(a[a.index("--sleep") + 1])
+            c.goto(a[1], sleep); print(c.eval("document.title + ' | ' + location.href"))
+        elif cmd == "eval": print(c.eval(a[1]))
+        elif cmd == "click": print(c.click_at(float(a[1]), float(a[2])))
+        elif cmd == "click-js": print(c.click_js(open(a[1]).read()))
+        elif cmd == "rect": print(c.eval(open(a[1]).read()))
+        elif cmd == "key":
+            for t in ("keyDown", "keyUp"):
+                c.send("Input.dispatchKeyEvent", {"type": t, "key": a[1], "code": a[1],
+                                                  "windowsVirtualKeyCode": 13 if a[1] == "Enter" else 0})
+        elif cmd == "eval-file": print(c.eval(open(a[1]).read()))
+        elif cmd == "shot": c.shot(a[1]); print(f"screenshot: {a[1]}")
+        elif cmd == "upload": print(c.upload(a[1], a[2]))
+        elif cmd == "upload-btn": print(c.upload_via_botao(a[1], a[2] if len(a) > 2 else "Carregar curr"))
+        elif cmd == "text": print(c.type_text(a[1]))
+        else: print(__doc__); return 1
+    finally:
+        c.close()
+    return 0
+
+if __name__ == "__main__":
+    sys.exit(main())

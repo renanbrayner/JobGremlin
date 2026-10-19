@@ -1,0 +1,56 @@
+#!/bin/bash
+# Sobe o Chromium de automação do LinkedIn com CDP.
+# O shell do agente NAO tem sessao grafica — sem as 3 vars abaixo o Chromium
+# morre com "Missing X server or $DISPLAY" e /json/version fica vazio.
+#
+# Perfil, porta e binário são configuráveis para que uma rodada paralela possa
+# usar um navegador separado sem disputar o perfil do sistema atual:
+#   LINKEDIN_PROFILE_DIR=... CDP_PORT=9334 career-ops-browser
+set -u
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/paths.sh
+. "$SCRIPT_DIR/lib/paths.sh"
+
+CDP_PORT="${CDP_PORT:-9333}"
+PROFILE="${LINKEDIN_PROFILE_DIR:-$HOME/.local/share/browser-profiles/linkedin}"
+CHROMIUM="${CHROMIUM_BIN:-/bin/chromium}"
+HEALTH_URL="${CDP_HEALTH:-http://127.0.0.1:$CDP_PORT/json/version}"
+
+if [ "${1:-}" = "--check" ]; then
+  echo "chromium: $CHROMIUM"
+  echo "profile: $PROFILE"
+  echo "port: $CDP_PORT"
+  exit 0
+fi
+
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-1}"
+export HYPRLAND_INSTANCE_SIGNATURE="${HYPRLAND_INSTANCE_SIGNATURE:-$(ls "$XDG_RUNTIME_DIR/hypr/" 2>/dev/null | head -1 || true)}"
+
+# se ja esta de pe, nao sobe outro
+if curl -sf --max-time 3 "$HEALTH_URL" >/dev/null 2>&1; then
+  echo "CDP ja ativo na $CDP_PORT"
+  exit 0
+fi
+
+# limpa locks de execucao anterior morta
+rm -f "$PROFILE/SingletonLock" "$PROFILE/Default/SingletonLock" 2>/dev/null
+
+nohup "$CHROMIUM" \
+  --user-data-dir="$PROFILE" \
+  --remote-debugging-port="$CDP_PORT" \
+  --remote-debugging-address=127.0.0.1 \
+  --remote-allow-origins=* \
+  --ozone-platform=wayland \
+  --no-first-run \
+  --disable-blink-features=AutomationControlled \
+  --no-default-browser-check \
+  >/dev/null 2>&1 &
+
+sleep 8
+if curl -sf --max-time 5 "$HEALTH_URL" >/dev/null 2>&1; then
+  echo "CDP OK na $CDP_PORT"
+else
+  echo "FALHOU ao subir o Chromium" >&2
+  exit 1
+fi

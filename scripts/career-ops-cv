@@ -1,0 +1,104 @@
+#!/usr/bin/env node
+// career-ops-cv — build a tailored CV PDF from the base payloads.
+//
+// Usage:
+//   career-ops-cv --slug <slug> --lang pt|en [--overrides <file.json>] [--no-pdf]
+//
+// Loads data/cv-base-{lang}.json, deep-merges overrides (from --overrides file
+// and/or an inline JSON string via --set), writes output/cv-<slug>.json, then
+// runs build-cv-html.mjs + generate-pdf.mjs.
+//
+// Overrides merge shallowly on `candidate`, `sections` and replace
+// `summary`/`competencies` wholesale; `experience`/`projects`/`education`/
+// `skills` replace wholesale when present (arrays are not concatenated).
+import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { join } from 'node:path';
+import {
+  DATA_DIR,
+  OUTPUT_DIR,
+  UPSTREAM_ROOT,
+  WORKSPACE_ROOT,
+  assertNotUpstream,
+  readData,
+} from './lib/paths.mjs';
+
+const args = process.argv.slice(2);
+const opt = (name, def) => {
+  const i = args.indexOf(name);
+  return i >= 0 && args[i + 1] ? args[i + 1] : def;
+};
+const flag = (name) => args.includes(name);
+
+const slug = opt('--slug');
+const lang = opt('--lang', 'pt');
+if (!slug) { console.error('missing --slug'); process.exit(2); }
+if (!['pt', 'en'].includes(lang)) { console.error('--lang must be pt|en'); process.exit(2); }
+
+const basePath = readData(`cv-base-${lang}.json`);
+if (!existsSync(basePath)) { console.error(`base not found: ${basePath}`); process.exit(2); }
+const base = JSON.parse(readFileSync(basePath, 'utf-8'));
+
+let overrides = {};
+const overrideFile = opt('--overrides');
+if (overrideFile) {
+  if (!existsSync(overrideFile)) { console.error(`overrides not found: ${overrideFile}`); process.exit(2); }
+  overrides = JSON.parse(readFileSync(overrideFile, 'utf-8'));
+}
+const inline = opt('--set');
+if (inline) {
+  overrides = { ...overrides, ...JSON.parse(inline) };
+}
+
+// shallow merge: top-level scalar/array fields replace, candidate & sections merge
+const merged = { ...base, ...overrides };
+merged.candidate = { ...base.candidate, ...(overrides.candidate || {}) };
+merged.sections = { ...base.sections, ...(overrides.sections || {}) };
+
+const date = new Date().toISOString().slice(0, 10);
+const outDir = OUTPUT_DIR;
+mkdirSync(outDir, { recursive: true });
+const jsonPath = join(outDir, `cv-${slug}.json`);
+const htmlPath = join(outDir, `cv-renan-${slug}.html`);
+const pdfPath = join(outDir, `cv-renan-${slug}-${date}.pdf`);
+
+// The upstream helpers read templates/profile/cv.md from UPSTREAM_ROOT but use
+// the workspace tracker as the output boundary, so PDFs and the PDF manifest
+// land here instead of in the installed career-ops checkout. When the workspace
+// has its own profile, point the helpers at the workspace so a local override
+// wins over the upstream one.
+const workspaceProfile = join(WORKSPACE_ROOT, 'config/profile.yml');
+const buildRoot = process.env.CAREER_OPS_ROOT
+  || (existsSync(workspaceProfile) ? WORKSPACE_ROOT : UPSTREAM_ROOT);
+const trackerPath = process.env.CAREER_OPS_TRACKER || join(DATA_DIR, 'applications.md');
+const pdfIndexPath = process.env.CAREER_OPS_PDF_INDEX || join(DATA_DIR, 'pdf-index.tsv');
+assertNotUpstream(trackerPath, 'write tracker');
+assertNotUpstream(pdfIndexPath, 'write PDF index');
+
+const childEnv = {
+  ...process.env,
+  CAREER_OPS_ROOT: buildRoot,
+  CAREER_OPS_TRACKER: trackerPath,
+  CAREER_OPS_PDF_INDEX: pdfIndexPath,
+};
+
+writeFileSync(jsonPath, JSON.stringify(merged, null, 2), 'utf-8');
+
+execFileSync('node', [join(UPSTREAM_ROOT, 'build-cv-html.mjs'), jsonPath, htmlPath], {
+  cwd: UPSTREAM_ROOT,
+  env: childEnv,
+  stdio: 'inherit',
+});
+console.log(`HTML: ${htmlPath}`);
+
+if (flag('--no-pdf')) {
+  console.log(`JSON: ${jsonPath}`);
+  process.exit(0);
+}
+
+execFileSync('node', [join(UPSTREAM_ROOT, 'generate-pdf.mjs'), htmlPath, pdfPath], {
+  cwd: UPSTREAM_ROOT,
+  env: childEnv,
+  stdio: 'inherit',
+});
+console.log(`PDF: ${pdfPath}`);

@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# career-ops-jd <linkedin-job-id> — navigate to a job page and dump its JD + meta as JSON.
+set -uo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/paths.sh
+. "$SCRIPT_DIR/lib/paths.sh"
+
+P="${CDP_BIN:-$CAREER_OPS_SCRIPTS/cdp}"
+JS="${JD_EXTRACT_JS:-$CAREER_OPS_SCRIPTS/jd-extract.js}"
+ID="${1:-}"
+[ -z "$ID" ] && { echo "usage: career-ops-jd <job-id>" >&2; exit 2; }
+timeout 30 "$P" goto "https://www.linkedin.com/jobs/view/$ID/" --sleep 4 >/dev/null 2>&1
+timeout 25 "$P" eval-file "$JS" 2>/dev/null | tail -1

@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+
+# Local workspace overrides and personal data. These are read from the
+# installed career-ops checkout when absent; never commit them.
+config/career-ops.env
+config/answers*.json
+config/cv-facts.json
+config/local-paths.txt
+config/profile.yml
+cv.md
+
+# Runtime state and generated artifacts
+data/*
+!data/.gitkeep
+output/*
+!output/.gitkeep
+*.log

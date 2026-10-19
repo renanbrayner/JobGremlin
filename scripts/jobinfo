@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# jobinfo <id> — abre a vaga no navegador logado e devolve company/title/applied/easyApply
+set -uo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/paths.sh
+. "$SCRIPT_DIR/lib/paths.sh"
+
+ID="${1:?uso: jobinfo <job-id>}"
+P="${CDP_BIN:-$CAREER_OPS_SCRIPTS/cdp}"
+timeout 40 "$P" goto "https://www.linkedin.com/jobs/view/$ID/" --sleep 4 >/dev/null 2>&1
+timeout 25 "$P" eval "(()=>{const t=(document.body.innerText||'').replace(/\s+/g,' ');
+const h1=document.querySelector('h1')?document.querySelector('h1').innerText.trim():'';
+const comp=(document.querySelector('.job-details-jobs-unified-top-card__company-name, a[href*=\"/company/\"]')||{}).innerText||'';
+const applied=/Candidatura enviada|Applied \d|Candidatura foi enviada/i.test(t);
+const easy=/Candidatura simplificada|Easy Apply/i.test(t);
+const closed=/N[ãa]o est[áa] mais aceitando|No longer accepting/i.test(t);
+return JSON.stringify({company:comp.replace(/\s+/g,' ').trim().slice(0,60),title:h1.slice(0,90),applied,easy,closed,url:location.href.slice(0,90)})})()"

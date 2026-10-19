@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# apply-one <job-id> <cv-pdf> — pre-carrega o CV na biblioteca e aplica via Easy Apply.
+# 1) jobinfo: confere se a vaga ja foi aplicada
+# 2) sobe o PDF tailor-made em /jobs/application-settings/ (sem file chooser nativo)
+# 3) easyapply --cv-library-only (escolhe o radio pelo nome do PDF)
+# 4) jobinfo de novo: so conta como enviada com applied=true
+set -uo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/paths.sh
+. "$SCRIPT_DIR/lib/paths.sh"
+
+ID="${1:?uso: apply-one <job-id> <cv-pdf>}"
+CV="${2:?uso: apply-one <job-id> <cv-pdf>}"
+LOG="$CAREER_OPS_DATA/apply-log-$(date +%F).log"
+CDP="${CDP_BIN:-$CAREER_OPS_SCRIPTS/cdp}"
+INFO="$CAREER_OPS_SCRIPTS/jobinfo"
+EASYAPPLY="$CAREER_OPS_SCRIPTS/easyapply"
+ANSWERS="${CAREER_OPS_ANSWERS:-$(career_ops_read_config answers-hermes.json)}"
+CVBASE=$(basename "$CV")
+CV=$(realpath "$CV" 2>/dev/null || echo "$CV")
+
+[ -f "$CV" ] || { echo "ERRO: CV nao existe: $CV" | tee -a "$LOG"; exit 3; }
+
+echo "=== $ID $(date +%H:%M:%S)" | tee -a "$LOG"
+INFO1=$("$INFO" "$ID" 2>/dev/null | tail -1)
+echo "  info1: $INFO1" | tee -a "$LOG"
+if echo "$INFO1" | grep -q '"applied":true'; then
+  echo "  -> JA APLICADA, pulando" | tee -a "$LOG"; exit 0
+fi
+if echo "$INFO1" | grep -q '"closed":true'; then
+  echo "  -> VAGA FECHADA, pulando" | tee -a "$LOG"; exit 4
+fi
+
+# 2) upload para a biblioteca
+timeout 40 "$CDP" goto "https://www.linkedin.com/jobs/application-settings/" --sleep 3 >/dev/null 2>&1
+UP=$(timeout 40 "$CDP" upload "input[type=file]" "$CV" 2>&1 | tail -1)
+echo "  upload biblioteca: $UP" | tee -a "$LOG"
+sleep 5
+LIB=$(timeout 25 "$CDP" eval "(()=>{const t=document.body.innerText||'';return t.includes('$CVBASE')?'na-lista':'nao-aparece'})()" 2>/dev/null | tail -1)
+echo "  biblioteca: $LIB" | tee -a "$LOG"
+
+# 3) aplicar
+EA_LOG="$(mktemp "${TMPDIR:-/tmp}/career-ops-ea-$ID.XXXXXX.log")"
+timeout 420 "$EASYAPPLY" --url "https://www.linkedin.com/jobs/view/$ID/" \
+  --cv "$CV" --answers "$ANSWERS" --cv-library-only \
+  --submit --max-steps 20 > "$EA_LOG" 2>&1
+RC=$?
+tail -12 "$EA_LOG" | tee -a "$LOG"
+
+if [ $RC -eq 6 ] || grep -q "FORMULARIO EM ESPERA" "$EA_LOG"; then
+  echo "  -> PAROU: formulario ABERTO esperando resposta (rc=6)" | tee -a "$LOG"
+  exit 6
+fi
+
+# 4) verificar
+sleep 3
+INFO2=$("$INFO" "$ID" 2>/dev/null | tail -1)
+echo "  info2: $INFO2" | tee -a "$LOG"
+if echo "$INFO2" | grep -q '"applied":true'; then
+  echo "  -> CONFIRMADO ENVIADA" | tee -a "$LOG"; exit 0
+fi
+echo "  -> NAO CONFIRMADO (easyapply rc=$RC)" | tee -a "$LOG"; exit 1

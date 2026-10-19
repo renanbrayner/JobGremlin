@@ -1,0 +1,71 @@
+#!/usr/bin/env node
+// career-ops-triage — classify pool titles into shortlist vs discard buckets.
+// Usage: career-ops-triage [pool-tsv] [--json]
+import { readFileSync, existsSync } from 'node:fs';
+import { DATA_DIR } from './lib/paths.mjs';
+
+const today = new Date().toISOString().slice(0, 10);
+const args = process.argv.slice(2).filter(a => !a.startsWith('--'));
+const asJson = process.argv.includes('--json');
+const tsv = args[0] || `${DATA_DIR}/pool-${today}.tsv`;
+if (!existsSync(tsv)) { console.error(`pool not found: ${tsv}`); process.exit(2); }
+
+// Ordered rules — first match wins. `re` tested against a folded (lowercased,
+// accent-stripped) title.
+const RULES = [
+  // ── discard buckets ──────────────────────────────────────────────────────
+  ['junior/estagio', /\b(estagi\w*|\bintern\b|internship|junior|j[uú]nior|\bjr\b|trainee|aprendiz|apprentice|entry.level)\b/],
+  ['qa/teste',       /\b(\bqa\b|quality assurance|quality engineer|\bq\.a\b|teste?s?\b|tester|test analyst|test engineer|sdet|automacao de teste|automation tester|analista de teste)\b/],
+  ['seguranca',      /\b(seguranca|security|appsec|\bsec\b|pentest|penetration|soc analyst|\bciso\b|threat|vulnerab|hacking|infosec|grc)\b/],
+  ['infra/devops',   /\b(devops|\bsre\b|site reliability|infraestrutura|\binfra\b|platform engineer|cloud engineer|cloud architect|sysadmin|administrador de redes|analista de redes|redes\b|suporte|support|service desk|help desk|noc\b|observability|dba|banco de dados\b)\b/],
+  ['lead/arquiteto/gestao', /\b(arquitet\w*|architect|tech lead|tecnico lead|lead developer|\blead\b|lider|gestor|gerente|manager|head of|coordenador|coordinator|diretor|director|supervisor|staff engineer|principal engineer|engineering manager|scrum master|product owner|product manager|gerencia|especialista em|specialist)\b/],
+  ['outra-funcao',   /\b(designer|\bux\b|\bui\b|vendas|sales|comercial|marketing|recrutad\w*|recruiter|financeiro|contab\w*|customer success|suporte ao cliente|analista de negocios|business analyst|dados?\b|data scien\w*|analytics|bi\b|power bi|machine learning engineer|cientista)\b/],
+];
+
+// ── positive dev signals ───────────────────────────────────────────────────
+const DEV = /\b(desenvolvedor\w*|developer|programador\w*|engenheir\w* de software|software engineer|full.?stack|front.?end|back.?end|frontend|backend|react|vue|angular|node(\.js)?|javascript|typescript|php|laravel|python|django|flask|java\b|\\.net|c#|golang|\bgo\b|ruby|rails|mobile|android|ios|flutter|kotlin|swift|web dev\w*|dev web|desenvolvedora)\b/;
+
+const fold = (s) => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+
+const lines = readFileSync(tsv, 'utf-8').split('\n').slice(1).filter(l => l.trim());
+
+// Prefer the enriched title (guest API) when it is longer than the pool's
+// virtualized-list title — the pool keeps whatever rendered, often "".
+const enrichedPath = tsv.replace(/\.tsv$/, '') + '-enriched.tsv';
+const enriched = new Map();
+if (existsSync(enrichedPath)) {
+  for (const l of readFileSync(enrichedPath, 'utf-8').split('\n').slice(1)) {
+    if (!l.trim()) continue;
+    const c = l.split('\t');
+    if (/^\d+$/.test(c[0]) && (c[1] || '').trim()) enriched.set(c[0], { title: c[1].trim(), company: (c[2] || '').trim(), loc: (c[3] || '').trim(), err: (c[7] || '').trim() });
+  }
+}
+
+const rows = [];
+for (const line of lines) {
+  const [id, title = '', keyword = ''] = line.split('\t');
+  if (!/^\d+$/.test(id)) continue;
+  const e = enriched.get(id);
+  const best = e && e.title.length > title.trim().length ? e.title : title.trim();
+  const f = fold(best);
+  let bucket = null;
+  for (const [name, re] of RULES) { if (re.test(f)) { bucket = name; break; } }
+  if (!bucket && !DEV.test(f)) bucket = best ? 'nao-dev' : 'titulo-nao-recuperado';
+  rows.push({ id, title: best, company: e ? e.company : '', loc: e ? e.loc : '', keyword, bucket });
+}
+
+const shortlist = rows.filter(r => !r.bucket);
+const counts = {};
+for (const r of rows) if (r.bucket) counts[r.bucket] = (counts[r.bucket] || 0) + 1;
+
+if (asJson) {
+  console.log(JSON.stringify({ tsv, total: rows.length, shortlist, descartadas: counts }, null, 2));
+} else {
+  console.log(`pool: ${tsv}`);
+  console.log(`vagas unicas: ${rows.length}`);
+  console.log(`descartadas  : ${rows.length - shortlist.length}`);
+  for (const [k, v] of Object.entries(counts).sort((a, b) => b[1] - a[1])) console.log(`   ${k.padEnd(22)} ${v}`);
+  console.log(`shortlist    : ${shortlist.length}`);
+  console.log('');
+  for (const r of shortlist) console.log(`${r.id}\t${r.keyword}\t${r.title}`);
+}

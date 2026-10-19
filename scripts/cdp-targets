@@ -1,0 +1,35 @@
+#!/usr/bin/env node
+// cdp-targets — list / close / open tabs without touching a page renderer.
+// Uses the DevTools HTTP endpoints only (/json/list, /json/close/<id>), so it
+// works even when a tab's renderer is hung and Runtime.evaluate times out.
+//
+// Usage:
+//   cdp-targets                 list (id, type, title, url)
+//   cdp-targets --page-only     list only type=page
+//   cdp-targets --close <id>    close a target
+//   cdp-targets --new <url>     open a new tab
+import { readFileSync } from 'node:fs';
+
+const PORT = process.env.CDP_PORT || (() => {
+  try { return readFileSync('/tmp/career-ops-browser-port', 'utf-8').trim(); } catch { return '9333'; }
+})();
+const base = `http://127.0.0.1:${PORT}`;
+const args = process.argv.slice(2);
+
+const list = async () => (await (await fetch(`${base}/json/list`)).json());
+
+if (args[0] === '--close') {
+  const r = await fetch(`${base}/json/close/${args[1]}`);
+  console.log('close:', await r.text());
+} else if (args[0] === '--new') {
+  const r = await fetch(`${base}/json/new?${encodeURIComponent(args[1] || 'about:blank')}`, { method: 'PUT' });
+  const j = await r.json().catch(() => ({}));
+  console.log('new:', j.id || JSON.stringify(j).slice(0, 120));
+} else {
+  const targets = await list();
+  const only = args.includes('--page-only');
+  for (const t of targets) {
+    if (only && t.type !== 'page') continue;
+    console.log(`${t.type}\t${t.id}\t${(t.title || '').slice(0, 45)}\t${(t.url || '').slice(0, 70)}`);
+  }
+}

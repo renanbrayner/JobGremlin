@@ -1,0 +1,62 @@
+#!/usr/bin/env python3
+"""cdp-unstick — try to unblock a hung renderer.
+
+Symptoms it addresses: /json/version answers but every Runtime.evaluate hangs
+(TimeoutError inside sock.recv). A JS dialog (alert/confirm/beforeunload) blocks
+the renderer's JS thread exactly like that, and CDP can dismiss it with
+Page.handleJavaScriptDialog.
+
+Usage: cdp-unstick [--accept|--dismiss] [--index N]
+"""
+import importlib.machinery as m
+import importlib.util, json, os, sys, time
+
+_cdp_path = os.environ.get("CDP_BIN", os.path.join(os.path.dirname(os.path.realpath(__file__)), "cdp"))
+loader = m.SourceFileLoader("cdpdriver", _cdp_path)
+spec = importlib.util.spec_from_loader("cdpdriver", loader)
+cdp = importlib.util.module_from_spec(spec)
+loader.exec_module(cdp)
+
+accept = "--dismiss" not in sys.argv
+idx = 0
+if "--index" in sys.argv:
+    idx = int(sys.argv[sys.argv.index("--index") + 1])
+
+c = cdp.CDP(cdp.port())
+c.connect(idx)
+print("target conectado")
+
+# How many pages exist?
+pages = [t for t in c.list_targets() if t.get("type") == "page"]
+print("abas page:", len(pages))
+for i, p in enumerate(pages):
+    print("  [%d] %s | %s" % (i, (p.get("title") or "")[:50], (p.get("url") or "")[:70]))
+
+try:
+    c.send("Page.enable")
+    print("Page.enable ok")
+except Exception as e:
+    print("Page.enable falhou:", str(e)[:80])
+
+# Try to dismiss any pending dialog (non-blocking check first).
+try:
+    r = c.send("Page.handleJavaScriptDialog", {"accept": accept}, timeout=5)
+    print("handleJavaScriptDialog:", json.dumps(r.get("result", r))[:200])
+except Exception as e:
+    print("handleJavaScriptDialog sem efeito:", str(e)[:80])
+
+# Blunt fallback: tell the renderer to stop loading / re-enable itself.
+for method, params in (("Runtime.runIfWaitingForDebugger", {}),
+                       ("Page.stopLoading", {})):
+    try:
+        c.send(method, params, timeout=6)
+        print(method, "ok")
+    except Exception as e:
+        print(method, "falhou:", str(e)[:70])
+
+try:
+    v = c.eval("1+1", timeout=8)
+    print("eval apos unstick:", v)
+except Exception as e:
+    print("eval ainda pendurado:", str(e)[:80])
+c.close()

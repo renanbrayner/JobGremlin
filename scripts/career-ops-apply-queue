@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# career-ops-apply-queue — processa a fila de vagas em SEQUENCIA (nunca em paralelo:
+# paralelo corrompe o CDP) e PARA quando o easyapply pede resposta (exit 6), para
+# nao perder o formulario que ficou aberto esperando o usuario.
+#
+# Uso: career-ops-apply-queue <arquivo-com-urls> [--cv <pdf>]
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/paths.sh
+. "$SCRIPT_DIR/lib/paths.sh"
+
+FILA="${1:?uso: career-ops-apply-queue <fila.txt> [--cv pdf]}"
+shift || true
+CV="${CAREER_OPS_CV:-}"
+while [ $# -gt 0 ]; do case "$1" in --cv) CV="$2"; shift 2;; *) shift;; esac; done
+if [ -z "$CV" ]; then
+  CV="$(ls -t "$CAREER_OPS_OUTPUT"/cv-*.pdf 2>/dev/null | head -1 || true)"
+fi
+if [ -z "$CV" ]; then
+  # Compatibility with the pre-parallel flow: its last CV is readable upstream.
+  CV="$CAREER_OPS_UPSTREAM/output/cv-renan-geral-2026-10-13.pdf"
+fi
+if [ ! -f "$CV" ]; then
+  echo "ERRO: CV nao encontrado: $CV; passe --cv <pdf> ou gere um em $CAREER_OPS_OUTPUT" >&2
+  exit 3
+fi
+ANSWERS="${CAREER_OPS_ANSWERS:-$(career_ops_read_config answers-hermes.json)}"
+
+DONE="$CAREER_OPS_DATA/queue-done.txt"; LOG="$CAREER_OPS_DATA/queue-log-$(date +%F).log"
+touch "$DONE"
+ok=0; pulou=0; parou=0; i=0
+
+while read -r URL; do
+  [ -z "$URL" ] && continue
+  grep -qF "$URL" "$DONE" && continue
+  i=$((i+1))
+  echo "=== [$i] $URL" | tee -a "$LOG"
+  OUT=$(cd "$CAREER_OPS_HOME" && HOME="$HOME" timeout 400 "$CAREER_OPS_SCRIPTS/easyapply" \
+        --url "$URL" --cv "$CV" --answers "$ANSWERS" \
+        --cv-fallback itlean --submit --max-steps 20 2>&1)
+  RC=$?
+  echo "$OUT" | tail -6 | tee -a "$LOG"
+  if echo "$OUT" | grep -q "STATUS FINAL: ENVIADA"; then
+    echo "$URL" >> "$DONE"; ok=$((ok+1)); echo "   -> ENVIADA" | tee -a "$LOG"
+  elif [ $RC -eq 6 ] || echo "$OUT" | grep -q "FORMULARIO EM ESPERA"; then
+    parou=1
+    echo "   -> PAROU: formulario ABERTO esperando resposta" | tee -a "$LOG"
+    echo "$OUT" > "$CAREER_OPS_DATA/queue-pendente.txt"
+    echo "PENDENTE: $URL" | tee -a "$LOG"
+    break
+  else
+    echo "$URL" >> "$DONE"; pulou=$((pulou+1)); echo "   -> PULADA (rc=$RC)" | tee -a "$LOG"
+  fi
+done < "$FILA"
+
+echo | tee -a "$LOG"
+echo "RESUMO DA FILA: enviadas=$ok | puladas=$pulou | parou_esperando=$parou" | tee -a "$LOG"
