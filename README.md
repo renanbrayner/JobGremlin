@@ -128,6 +128,50 @@ Os defaults de caminho foram reparametrizados para o workspace. Em particular,
 dele, o último CV do fluxo atual no upstream. `career-ops-pool`,
 `career-ops-browser`, `cdp` e `cdp-targets` honram `CDP_PORT`.
 
+## Sessões observáveis
+
+Cada execução de aplicação grava uma sessão em
+`output/sessions/<run_id>/`:
+
+```
+output/sessions/<run_id>/
+├── session.json         # run_id, status, created_at, finished_at, job
+├── events.jsonl         # um evento JSON por linha, append-only
+└── screenshots/         # evidência visual, nomes estáveis por etapa
+```
+
+Eventos seguem este schema fixo:
+
+```json
+{
+  "ts": "2026-10-19T12:00:00.320000+00:00",
+  "run_id": "2026-10-19-morning",
+  "job_id": "4411222",
+  "stage": "form_page",
+  "page": 1,
+  "status": "ok",
+  "duration_ms": 320,
+  "artifact": "screenshots/001-form-page-1.png",
+  "detail": null
+}
+```
+
+As etapas registradas pelo adaptador são `open`, `form_page` (com `page`),
+`cv_selection`, `review`, `submit`, `waiting` e `error`. Screenshots são
+nomeadas pela etapa (`open.png`, `form-page-1.png`, `review.png`, ...); uma
+segunda captura bem-sucedida da mesma etapa recebe sufixo (`error-2.png`), sem
+renomear as anteriores. Cada evento aponta para o arquivo correspondente em
+`artifact`.
+
+O rastreamento é exposto por `career_ops.session.SessionRecorder`; a captura
+fica atrás de um callable injetável (`career_ops.capture`). Em timeout do CDP,
+o recorder tenta automaticamente uma captura do sistema com `grim` antes de
+marcar o evento como falho; quando o fallback funciona, o evento mantém o
+status da etapa e registra `detail.source = "fallback"`. Uma aplicação que
+levanta exceção (ou chama `SessionRecorder.fail`) ainda fecha a sessão com
+`status: failed`, um evento `error` e a screenshot de erro (ou a captura via
+`grim` quando o renderer está travado), então a sessão continua inspecionável.
+
 ## Navegador em paralelo
 
 Por padrão os scripts usam o mesmo perfil e a mesma porta CDP do sistema atual
