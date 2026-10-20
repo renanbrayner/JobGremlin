@@ -196,12 +196,11 @@ def render_rehearsal_report(
         },
         "isolation": dict(isolation) if isolation is not None else None,
     }
-    return _render_markdown(payload, steps, step_payloads, rows), payload
+    return _render_markdown(payload, step_payloads, rows), payload
 
 
 def _render_markdown(
     payload: Mapping[str, object],
-    steps: Sequence[RehearsalStep],
     step_payloads: Sequence[_StepPayload],
     rows: Sequence[_ComparisonRow],
 ) -> str:
@@ -248,9 +247,9 @@ def _render_markdown(
             "## Comparação com a linha de base de 19/10",
             "",
             "| Métrica | 19/10 | "
-            + " | ".join(str(step.label) for step in steps)
+            + " | ".join(step.label for step in step_payloads)
             + " |",
-            "| --- | ---: | " + " | ".join("---:" for _ in steps) + " |",
+            "| --- | ---: | " + " | ".join("---:" for _ in step_payloads) + " |",
         ]
     )
     for row in rows:
