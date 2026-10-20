@@ -33,10 +33,14 @@ outputs próprios, e a suíte pytest roda localmente.
 ├── data/                # fila, JDs, logs e estado de execução
 ├── output/              # CVs e artefatos gerados
 ├── scripts/             # cópias isoladas dos scripts do fluxo
+│   ├── check            # pytest + mypy + ruff
 │   └── lib/             # contrato compartilhado de caminhos (bash/node/python)
-├── src/career_ops/      # pacote Python (path contract; CLI nasce nos próximos tickets)
+├── src/career_ops/      # pacote Python (contratos reutilizáveis; CLI nos próximos tickets)
 ├── tests/               # pytest: paths, smoke dos comandos e isolamento
-├── docs/                # documentação de agentes
+├── docs/adr/            # decisões de arquitetura
+├── docs/agents/         # convenções para agentes
+├── GLOSSARY.md          # vocabulário do domínio
+├── CODING_STANDARDS.md  # critérios de review
 └── .scratch/            # spec e issues do MVP
 ```
 
@@ -57,6 +61,8 @@ Os caminhos podem ser definidos por variáveis de ambiente ou por um arquivo
 | `CAREER_OPS_DATA` | `$CAREER_OPS_HOME/data` | dados e logs próprios |
 | `CAREER_OPS_OUTPUT` | `$CAREER_OPS_HOME/output` | CVs e artefatos próprios |
 | `CAREER_OPS_SCRIPTS` | `$CAREER_OPS_HOME/scripts` | scripts copiados |
+| `CAREER_OPS_RENDERER_TIMEOUT_SECONDS` | `30` | prazo rígido por operação do navegador |
+| `CAREER_OPS_APPLY_TIMEOUT_SECONDS` | `420` | prazo de um `easyapply` completo por vaga |
 | `CAREER_OPS_ENV_FILE` | `$CAREER_OPS_CONFIG/career-ops.env` | arquivo de override |
 
 Configurações pessoais (por exemplo `config/profile.yml`,
@@ -65,12 +71,28 @@ workspace quando existem e, caso contrário, do upstream. Elas ficam fora do git
 por padrão. O `cv.md`, quando copiado para o workspace, habilita o fact gate do
 `generate-pdf.mjs` upstream.
 
-## Rodando a suíte
+## Desenvolvimento
 
-Requer Python 3.11+ e pytest (já disponível no ambiente).
+Requer `uv` e Python 3.11+. O repo fixa Python 3.14 em `.python-version` e
+declara as ferramentas de desenvolvimento em `pyproject.toml`, com versões
+travadas em `uv.lock`.
 
 ```bash
-python3 -m pytest
+uv sync --all-groups
+git config core.hooksPath .githooks   # uma vez; instala o pre-commit local
+./scripts/check
+```
+
+O hook roda o mesmo `./scripts/check` antes de cada commit. O CI
+(`.github/workflows/check.yml`) usa o mesmo comando com o lock travado.
+
+## Rodando a suíte
+
+`./scripts/check` roda pytest, mypy e ruff. Para rodar apenas a suíte:
+
+```bash
+uv run pytest
+uv run pytest tests/test_submission.py
 ```
 
 Os testes cobrem:
@@ -80,6 +102,11 @@ Os testes cobrem:
   build de CV contra um upstream falso;
 - smoke de todos os entrypoints copiados (`--help`, uso inválido, `cdp-targets`
   contra um servidor CDP falso);
+- `career-ops-run` de ponta a ponta com o adaptador fake (sucesso, não
+  confirmado, CV errado, timeout e CV ausente), incluindo o JSON e a sessão;
+- fila de candidatos, filtros de título e localização, perfil estruturado da JD,
+  elegibilidade determinística, dedupe e JD ausente;
+- o adaptador real embrulha `jobinfo`/`easyapply`/`cdp` sem alterar os scripts;
 - garantia de que os comandos não alteram o upstream falso.
 
 ## Smoke tests manuais
@@ -88,7 +115,7 @@ Os comandos abaixo não tocam o LinkedIn. Rode a partir da raiz do repo:
 
 ```bash
 # caminhos resolvidos
-PYTHONPATH=src python3 -c 'from career_ops.paths import resolve_paths; print(resolve_paths())'
+uv run python -c 'from career_ops.paths import resolve_paths; print(resolve_paths())'
 
 # os scripts executam a partir do workspace
 scripts/career-ops-browser --check
@@ -156,12 +183,14 @@ Eventos seguem este schema fixo:
 }
 ```
 
-As etapas registradas pelo adaptador são `open`, `form_page` (com `page`),
-`cv_selection`, `review`, `submit`, `waiting` e `error`. Screenshots são
-nomeadas pela etapa (`open.png`, `form-page-1.png`, `review.png`, ...); uma
-segunda captura bem-sucedida da mesma etapa recebe sufixo (`error-2.png`), sem
-renomear as anteriores. Cada evento aponta para o arquivo correspondente em
-`artifact`.
+O recorder suporta as etapas `open`, `form_page` (com `page`), `cv_selection`,
+`review`, `submit`, `waiting` e `error`. O `career-ops-run` registra hoje
+`open`, `cv_selection`, `review`, `submit` e `error`; as capturas por página do
+formulário (`form_page`) ainda dependem de instrumentar o `easyapply` copiado.
+Screenshots são nomeadas pela etapa (`open.png`, `form-page-1.png`,
+`review.png`, ...); uma segunda captura bem-sucedida da mesma etapa recebe
+sufixo (`error-2.png`), sem renomear as anteriores. Cada evento aponta para o
+arquivo correspondente em `artifact`.
 
 O rastreamento é exposto por `career_ops.session.SessionRecorder`; a captura
 fica atrás de um callable injetável (`career_ops.capture`). Em timeout do CDP,
@@ -171,6 +200,218 @@ status da etapa e registra `detail.source = "fallback"`. Uma aplicação que
 levanta exceção (ou chama `SessionRecorder.fail`) ainda fecha a sessão com
 `status: failed`, um evento `error` e a screenshot de erro (ou a captura via
 `grim` quando o renderer está travado), então a sessão continua inspecionável.
+
+## Anexo de CV e renderer travado
+
+O envio é protegido por três peças em `src/career_ops/`:
+
+- `cv_attachment.verify_cv_attachment(expected, selected)` compara o nome do
+  PDF esperado com **apenas o CV selecionado** no formulário (não a biblioteca
+  inteira), sem aceitar fallback. CV errado ou ausente vira `WrongCvAttached` e
+  a candidatura **não** é enviada.
+- `renderer.RendererWatchdog` dá um prazo rígido a cada operação do navegador,
+  configurável por `CAREER_OPS_RENDERER_TIMEOUT_SECONDS` (padrão 30s), tanto
+  pelo ambiente quanto por `config/career-ops.env`. Ao estourar, levanta
+  `RendererTimeout` com `retryable = True`.
+  `CommandRecovery`/`cdp_unstick_recovery` executam o `cdp-unstick` copiado e
+  `RecoverableBrowser` descarta o socket antigo e reconecta no **mesmo target**
+  antes de uma nova tentativa, sem destruir uma aba em espera.
+- `submission.SubmissionGuard` orquestra a ordem segura: anexa o CV esperado
+  sob deadline, relê somente o CV selecionado, captura `cv_selection` e
+  `review`, clica em enviar, captura `submit` e só considera a vaga enviada
+  quando o LinkedIn confirma (`verify()`). Um timeout antes do clique registra
+  erro (com fallback para `grim`), recupera o navegador e tenta de novo, no
+  máximo duas vezes. Um timeout depois do clique, ou um envio sem confirmação,
+  não é marcado como retryable: o LinkedIn pode já ter registrado a candidatura.
+
+O adaptador real do ticket #04 usa esse núcleo; os scripts copiados
+(`easyapply`, `apply-one`) não foram alterados neste slice.
+
+```bash
+CAREER_OPS_RENDERER_TIMEOUT_SECONDS=20 uv run pytest tests/test_submission.py
+```
+
+## Aplicar uma vaga (`career-ops-run`)
+
+`scripts/career-ops-run --job <id>` executa uma vaga explícita de ponta a ponta
+e devolve **um objeto JSON** em stdout. Ele só retorna sucesso (exit `0`) quando
+o `jobinfo` confirma que o LinkedIn registrou a candidatura; um clique sem
+confirmação é `status: "failed"` com motivo `not_confirmed`.
+
+```bash
+# CV explícito
+scripts/career-ops-run --job 4411222 --cv output/cv-renan-react-2026-10-19.pdf
+
+# sem --cv: usa $CAREER_OPS_CV ou o cv-*.pdf mais recente de output/
+scripts/career-ops-run --job 4411222
+
+# ensaio sem navegador, com o adaptador fake
+scripts/career-ops-run --job 4411222 --cv output/cv-renan-react.pdf \
+  --adapter fake --fake-scenario success
+```
+
+O adaptador fake (`--adapter fake`) aceita cinco cenários: `success`,
+`failure` (envio sem confirmação), `wrong_cv` (PDF anterior selecionado),
+`timeout` (upload do CV congela o renderer) e `waiting_input` (formulário para
+numa pergunta e fica aberto, exit `6`). Ele executa o mesmo orquestrador e grava
+uma sessão real em `output/sessions/<run_id>/`, sem tocar no LinkedIn.
+
+Saída (resumida):
+
+```json
+{
+  "command": "career-ops-run",
+  "status": "verified",
+  "run_id": "2026-10-19T12-00-00Z",
+  "job": {"id": "4411222", "title": "...", "company": "...", "applied": false},
+  "result": {"submitted": true, "verified": true, "reason": "verified",
+             "attempts": 1, "expected_cv": "cv-....pdf",
+             "selected_cvs": ["cv-....pdf"], "retryable": false},
+  "failure": null,
+  "artifacts": {
+    "session_dir": ".../output/sessions/2026-10-19T12-00-00Z",
+    "session_json": ".../session.json",
+    "events": ".../events.jsonl",
+    "screenshots": [".../screenshots/open.png", ".../screenshots/submit.png"]
+  },
+  "cv": ".../output/cv-....pdf"
+}
+```
+
+Exit codes: `0` verificado, `1` não verificado, `2` argumentos inválidos, `3`
+CV/answers/configuração ausente e `6` formulário aguardando resposta (a aba fica
+aberta). `--help` imprime o texto humano, o schema e os exit codes.
+
+O adaptador real embrulha os scripts copiados sem alterá-los:
+
+1. `jobinfo` abre a vaga e informa `applied`, `closed` e `easy`;
+2. `cdp` pré-carrega o PDF em `/jobs/application-settings/` (sem abrir o file
+   picker nativo) e escolhe o rádio do CV esperado quando a tela oferece um;
+3. `easyapply --cv-library-only` preenche o formulário e para na revisão;
+4. o guard do ticket #03 relê **somente o CV selecionado**, tira as screenshots
+   e clica em enviar;
+5. `easyapply --resume --submit` envia e `jobinfo` confirma.
+
+O `easyapply` copiado não foi alterado e mantém seus próprios fallbacks
+internos. O guard deste repo é a barreira final: se o CV selecionado não for o
+PDF esperado, o clique de envio não acontece.
+
+Cada chamada externa tem deadline; um timeout de subprocesso vira
+`RendererTimeout`, registra evidência (com fallback `grim`) e aciona o
+`cdp-unstick`. `CAREER_OPS_APPLY_TIMEOUT_SECONDS` limita um `easyapply` completo.
+
+### Smoke test manual do adaptador real
+
+O teste automatizado nunca usa o LinkedIn. Para validar o adaptador real, com um
+navegador CDP já autenticado:
+
+```bash
+# 1. perfil/porta paralelos (o login atual continua intocado)
+export LINKEDIN_PROFILE_DIR=~/.local/share/browser-profiles/linkedin-parallel
+export CDP_PORT=9334
+scripts/career-ops-browser
+
+# 2. CV de teste (o gerador por vaga chega no ticket #06)
+scripts/career-ops-cv --slug smoke --lang pt
+
+# 3. uma única vaga, observando o JSON e a sessão
+scripts/career-ops-run --job <job-id> --cv output/cv-smoke-*.pdf
+ls output/sessions/<run_id>/
+```
+
+O `CDP_PORT=9334` exportado é essencial: sem ele, `scripts/cdp` usaria a porta
+do navegador do sistema atual (9333) e a rodada deixaria de ser paralela.
+
+O smoke test só é considerado bem-sucedido com `status: "verified"`; qualquer
+outro resultado deve ser diagnosticado pelas screenshots e pelo `events.jsonl`.
+
+## Fila, filtros e elegibilidade (`--candidates`)
+
+`career-ops-run --candidates <arquivo>` aceita uma lista de candidatos, mantém
+uma fila persistente em `data/queue.json` e aplica **a primeira vaga elegível**.
+O formato pode ser JSON (array ou `{"candidates": [...]}`) ou TSV no formato do
+`career-ops-pool`/`career-ops-enrich` (o TSV enriquecido traz localização e
+modelo de trabalho; o pool puro só tem título e tende a ser rejeitado pelo
+filtro de localização).
+
+```bash
+# JSON: id, title, company, location, workplace, is_remote, url
+scripts/career-ops-run --candidates data/candidates.json \
+  --cv output/cv-renan-react.pdf
+
+# ensaio offline: as JDs vêm de data/jd-fixtures/<job-id>.txt
+scripts/career-ops-run --candidates data/candidates.json \
+  --jd-dir data/jd-fixtures --cv output/cv-renan-react.pdf \
+  --adapter fake --run-id queue-demo
+```
+
+A fila guarda um registro por `id` e nunca repete um id que já está em estado
+terminal (`title_rejected`, `ineligible`, `waiting_input`, `submitted`,
+`verified`, `applying`) sem um motivo explícito passado a
+`JobQueue.ingest(..., requeue_reason=...)`. Duplicatas dentro da mesma lista e
+em execuções seguintes voltam com `status: "skipped"` e o motivo
+(`duplicate`, `blocked:<estado>`, `already_applied`, `job_closed`, `discarded`).
+Estados usados neste slice: `new`, `title_rejected`, `jd_fetched`, `eligible`,
+`ineligible`, `applying`, `waiting_input`, `failed`, `submitted`, `verified`.
+
+### Filtros rápidos (antes da JD)
+
+- **Título**: rejeita estágio (`title_internship`), júnior (`title_junior`), QA
+  (`title_qa`), segurança (`title_security`), infraestrutura/DevOps
+  (`title_infra`), liderança/arquitetura/gestão (`title_leadership`) e funções
+  fora de desenvolvimento (`title_non_dev`). Título vazio vira `title_missing`.
+- **Localização**: aceita remoto em qualquer lugar (`location_remote`) ou
+  presencial na região de Recife (`location_recife_onsite`). Rejeita híbrido em
+  qualquer lugar (`location_hybrid`), presencial fora da região
+  (`location_outside_region`) e localização ausente (`location_missing`). Como a
+  máquina de estados não tem um estado de localização, essa rejeição é gravada
+  como `ineligible` com `detail.filter = "location"`.
+- Só depois dos dois filtros a JD é buscada. A busca real usa o endpoint guest
+  do LinkedIn; `--jd-dir` lê `<job-id>.txt` para rodadas offline. JD ausente
+  vira `failed` com `reason: "jd_missing"` e a fila continua na próxima vaga.
+
+### Perfil estruturado e elegibilidade
+
+Cada JD baixada vira um `JobProfile` determinístico com `language` (`pt`, `en`
+ou `unknown`), `family` (`frontend`, `backend`, `fullstack`, `mobile`, `data`,
+`devops`, `qa`, `other`), `seniority` (`intern`, `junior`, `mid`, `senior`,
+`lead`, `unspecified`), `required_skills` e `preferred_skills`. As skills são
+extraídas de seções de requisitos/diferenciais por um vocabulário fixo; nenhum
+LLM participa.
+
+As regras de elegibilidade são configuráveis em `config/eligibility.json`
+(opcional; na ausência do arquivo valem os defaults):
+
+```json
+{
+  "languages": ["pt", "en"],
+  "families": ["frontend", "backend", "fullstack", "mobile"],
+  "seniorities": ["mid", "senior", "unspecified"],
+  "max_required_skills": null
+}
+```
+
+A decisão é auditável: `reason` é `eligible`, `language_unsupported`,
+`family_not_targeted`, `seniority_not_targeted` ou
+`too_many_required_skills`, e `checks` registra todas as regras avaliadas. A
+vaga elegível é encaminhada ao fluxo de aplicação; o registro passa por
+`applying` e termina em `verified`, `waiting_input`, `ineligible` ou `failed`.
+As demais sobreviventes ficam em `new`, sem JD baixada, para a próxima execução
+ou para o loop diário do ticket #07.
+
+O JSON de saída em modo fila acrescenta:
+
+```json
+"queue": {
+  "path": ".../data/queue.json",
+  "selection": {"id": "4411222", "profile": {...}, "decision": {...}},
+  "ingested": [{"id": "4411222", "status": "enqueued", "reason": null}],
+  "record": {"id": "4411222", "state": "verified", ...}
+}
+```
+
+Se nenhuma vaga passar pelos filtros e pela elegibilidade, o comando devolve
+exit `1` com `failure.reason = "no_eligible_job"` e a fila completa no JSON.
 
 ## Navegador em paralelo
 
@@ -185,9 +426,10 @@ CDP_PORT=9334 scripts/career-ops-browser
 
 ## Limitações conhecidas deste slice
 
-- A CLI determinística (`career-ops-run`, `career-ops-reply`,
-  `career-ops-status`, `career-ops-report`, `career-ops-help`) ainda não existe;
-  ela é construída nos próximos tickets.
+- `career-ops-run` já aplica **uma** vaga explícita ou a primeira vaga elegível
+  de uma lista persistente. O loop diário com meta de 20, cache/geração de CV,
+  `career-ops-reply`, `career-ops-status`, `career-ops-report` e
+  `career-ops-help --json` ainda são construídos nos próximos tickets.
 - O build de CV delega aos helpers do upstream. O HTML/PDF e o índice de PDFs
   são gravados em `output/` e `data/`; para o fact gate completo, copie
   `cv.md`/`config/profile.yml` para o workspace quando quiser uma visão local.

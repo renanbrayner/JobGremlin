@@ -18,6 +18,22 @@ Create a new file under `.scratch/<feature-slug>/` (creating the directory if ne
 
 Read the file at the referenced path. The user will normally pass the path or the issue number directly.
 
+Read only the feature's `spec.md` and the referenced ticket. Do not enumerate
+every file under `issues/` unless the task is explicitly about the whole feature.
+
+## Definition of Done
+
+Before setting `Status: done` on an implementation issue:
+
+- Run `./scripts/check` and keep it green.
+- Run the `code-review` skill with this issue as the spec. Use the commit the
+  ticket started from, or a fixed point the user supplies, as the review base.
+  Both axes run as parallel sub-agents.
+- Resolve the findings, or record each accepted remainder under `## Comments`
+  with the reason.
+- Update the acceptance checklist and add a short implementation note under
+  `## Comments`.
+
 ## Wayfinding operations
 
 Used by `/wayfinder`. The **map** is a file with one **child** file per ticket.

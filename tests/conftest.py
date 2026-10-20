@@ -7,8 +7,98 @@ from pathlib import Path
 
 import pytest
 
+from career_ops.paths import WorkspacePaths
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS_DIR = REPO_ROOT / "scripts"
+# Keep subprocess tests independent of the shell's asdf shims. Some tests
+# replace HOME, and an asdf shim then cannot find its version.
+STABLE_PATH = os.pathsep.join([os.defpath, os.environ.get("PATH", "")])
+
+
+class FakeScreenshotter:
+    def __init__(self, payload: bytes = b"png-bytes") -> None:
+        self.payload = payload
+        self.calls: list[Path] = []
+
+    def __call__(self, path: Path) -> None:
+        self.calls.append(path)
+        path.write_bytes(self.payload)
+
+
+def read_events(recorder) -> list[dict]:
+    return [
+        json.loads(line)
+        for line in recorder.events_path.read_text(encoding="utf-8").splitlines()
+        if line
+    ]
+
+
+class ScriptedRunner:
+    """Stand-in for subprocess.run that returns a scripted sequence.
+
+    An entry may be a ``CompletedProcess`` or an exception to raise.  Used by
+    tests that exercise command composition without running a browser.
+    """
+
+    def __init__(self, *responses: object) -> None:
+        self.responses = list(responses)
+        self.calls: list[list[str]] = []
+
+    def __call__(self, argv, **kwargs):
+        self.calls.append(list(argv))
+        response = self.responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+
+def completed_process(
+    argv,
+    *,
+    returncode: int = 0,
+    stdout: str = "",
+    stderr: str = "",
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess(argv, returncode, stdout, stderr)
+
+
+class FakeRunner:
+    """Stand-in for subprocess.run used by capture/recovery tests."""
+
+    def __init__(
+        self,
+        *,
+        returncode: int = 0,
+        error: Exception | None = None,
+        stderr: str = "boom",
+        write_file: bool = True,
+    ) -> None:
+        self.returncode = returncode
+        self.error = error
+        self.stderr = stderr
+        self.write_file = write_file
+        self.calls: list[list[str]] = []
+
+    def __call__(self, argv, **kwargs):
+        self.calls.append(list(argv))
+        if self.error is not None:
+            raise self.error
+        if self.returncode == 0 and self.write_file:
+            Path(argv[-1]).write_bytes(b"command-png")
+        return subprocess.CompletedProcess(argv, self.returncode, "", self.stderr)
+
+
+@pytest.fixture
+def paths(workspace: Path, fake_upstream: Path) -> WorkspacePaths:
+    return WorkspacePaths(
+        home=workspace,
+        upstream=fake_upstream,
+        config=workspace / "config",
+        data=workspace / "data",
+        output=workspace / "output",
+        scripts=workspace / "scripts",
+    )
 
 
 @pytest.fixture
@@ -74,6 +164,7 @@ def env(workspace: Path, fake_upstream: Path) -> dict[str, str]:
         "CAREER_OPS_DATA": str(workspace / "data"),
         "CAREER_OPS_OUTPUT": str(workspace / "output"),
         "CAREER_OPS_SCRIPTS": str(SCRIPTS_DIR),
+        "PATH": STABLE_PATH,
     }
 
 

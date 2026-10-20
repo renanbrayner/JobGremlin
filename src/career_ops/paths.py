@@ -124,11 +124,30 @@ class WorkspacePaths:
         return None
 
 
-def resolve_paths(environ: Mapping[str, str] | None = None) -> WorkspacePaths:
-    """Build the workspace path contract from the environment/env file."""
+def load_environment(environ: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Return the environment with ``config/career-ops.env`` applied.
+
+    Real environment variables win; the env file fills the gaps.  An explicit
+    mapping replaces the process environment but still honours the workspace
+    env file, matching the path contract used by the copied scripts.
+    """
     values = _environment(environ)
     _load_env_file(values)
+    return values
 
+
+def expand_path(raw: str, environ: Mapping[str, str] | None = None) -> Path:
+    """Expand ``$VARS`` and ``~`` in a configured path.
+
+    Configuration values follow the same precedence and expansion rules as the
+    env file, including values that arrive through the real environment.
+    """
+    return _expand(raw, _environment(environ))
+
+
+def resolve_paths(environ: Mapping[str, str] | None = None) -> WorkspacePaths:
+    """Build the workspace path contract from the environment/env file."""
+    values = load_environment(environ)
     home = _resolved(values, "CAREER_OPS_HOME", str(REPO_ROOT))
     upstream = _resolved(values, "CAREER_OPS_UPSTREAM", _UPSTREAM_DEFAULT)
     paths = WorkspacePaths(

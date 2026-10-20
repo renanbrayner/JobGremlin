@@ -12,6 +12,7 @@ from career_ops.capture import (
     cdp_screenshotter,
     grim_screenshotter,
 )
+from conftest import FakeRunner
 
 
 class RecordingShot:
@@ -24,28 +25,6 @@ class RecordingShot:
         if self.error is not None:
             raise self.error
         path.write_bytes(b"fake-png")
-
-
-class FakeRunner:
-    def __init__(
-        self,
-        *,
-        returncode: int = 0,
-        error: Exception | None = None,
-        stderr: str = "boom",
-    ) -> None:
-        self.returncode = returncode
-        self.error = error
-        self.stderr = stderr
-        self.calls: list[list[str]] = []
-
-    def __call__(self, argv, **kwargs):
-        self.calls.append(list(argv))
-        if self.error is not None:
-            raise self.error
-        if self.returncode == 0:
-            Path(argv[-1]).write_bytes(b"command-png")
-        return subprocess.CompletedProcess(argv, self.returncode, "", self.stderr)
 
 
 def test_a_working_primary_capture_does_not_run_the_fallback(tmp_path):

@@ -7,8 +7,8 @@ from pathlib import Path
 import pytest
 
 from career_ops.capture import CaptureTimeout
-from career_ops.paths import WorkspacePaths
 from career_ops.session import SessionRecorder
+from conftest import FakeScreenshotter, read_events
 
 UTC = timezone.utc
 
@@ -24,36 +24,6 @@ class FakeClock:
 
     def advance(self, milliseconds: int) -> None:
         self.current += timedelta(milliseconds=milliseconds)
-
-
-@pytest.fixture
-def paths(workspace: Path, fake_upstream: Path) -> WorkspacePaths:
-    return WorkspacePaths(
-        home=workspace,
-        upstream=fake_upstream,
-        config=workspace / "config",
-        data=workspace / "data",
-        output=workspace / "output",
-        scripts=workspace / "scripts",
-    )
-
-
-class FakeScreenshotter:
-    def __init__(self, payload: bytes = b"png-bytes") -> None:
-        self.payload = payload
-        self.calls: list[Path] = []
-
-    def __call__(self, path: Path) -> None:
-        self.calls.append(path)
-        path.write_bytes(self.payload)
-
-
-def read_events(recorder: SessionRecorder) -> list[dict]:
-    return [
-        json.loads(line)
-        for line in recorder.events_path.read_text(encoding="utf-8").splitlines()
-        if line
-    ]
 
 
 def test_an_application_run_creates_a_session_directory_with_metadata(paths, workspace):
@@ -146,8 +116,8 @@ def test_screenshots_get_stable_names_and_are_referenced_by_their_events(paths):
     page_one = recorder.capture("form_page", page=1)
     page_two = recorder.capture("form_page", page=2)
     cv_selection = recorder.capture("cv_selection")
-    review = recorder.capture("review")
-    submit = recorder.capture("submit")
+    recorder.capture("review")
+    recorder.capture("submit")
     waiting = recorder.capture("waiting")
     error = recorder.capture("error", status="failed", detail={"reason": "renderer frozen"})
 

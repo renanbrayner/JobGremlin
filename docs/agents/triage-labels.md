@@ -12,4 +12,9 @@ The skills speak in terms of five canonical triage roles. This file maps those r
 
 When a skill mentions a role, use the corresponding value on the `Status:` line of the issue file.
 
+## Completion
+
+Implemented issues use `Status: done`. `done` is a completion marker, not a
+triage role: open work still uses one of the values above.
+
 Edit the "Value in `Status:`" column to match whatever vocabulary you actually use.

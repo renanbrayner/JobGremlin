@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import subprocess
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from conftest import SCRIPTS_DIR, REPO_ROOT
+from conftest import SCRIPTS_DIR
+
+NODE = shutil.which("node", path=os.defpath) or "node"
 
 
 def _write_pool(path: Path) -> None:
@@ -154,7 +158,7 @@ def test_browser_script_can_be_checked_without_starting_chromium(run):
 def test_javascript_snippets_parse():
     for name in ("form-dump.js", "jd-extract.js"):
         result = subprocess.run(
-            ["node", "--check", str(SCRIPTS_DIR / name)],
+            [NODE, "--check", str(SCRIPTS_DIR / name)],
             text=True,
             capture_output=True,
             check=False,

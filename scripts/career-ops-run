@@ -1,0 +1,17 @@
+#!/usr/bin/env python3
+"""Entry point for ``career-ops-run`` (see ``career_ops.cli``).
+
+The repo is not installed as a package, so the wrapper puts ``src/`` on the
+import path.  It is a real file, not a symlink into the current installation.
+"""
+
+import sys
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT / "src"))
+
+from career_ops.cli import main  # noqa: E402
+
+if __name__ == "__main__":
+    raise SystemExit(main())

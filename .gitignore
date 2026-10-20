@@ -3,6 +3,8 @@ __pycache__/
 *.py[cod]
 .venv/
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
 # Local workspace overrides and personal data. These are read from the
 # installed career-ops checkout when absent; never commit them.

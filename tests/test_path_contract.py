@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
+import sys
 from pathlib import Path
 
-from conftest import REPO_ROOT, SCRIPTS_DIR
+from conftest import REPO_ROOT, SCRIPTS_DIR, STABLE_PATH
+
+NODE = shutil.which("node", path=os.defpath) or "node"
 
 FIELDS = ("home", "upstream", "config", "data", "output", "scripts")
 
@@ -15,6 +19,7 @@ def _contract_env(workspace: Path, upstream: Path, config: Path, home: Path) -> 
     return {
         **base,
         "HOME": str(home),
+        "PATH": STABLE_PATH,
         "CAREER_OPS_HOME": str(workspace),
         "CAREER_OPS_UPSTREAM": str(upstream),
         "CAREER_OPS_CONFIG": str(config),
@@ -25,7 +30,7 @@ def _contract_env(workspace: Path, upstream: Path, config: Path, home: Path) -> 
 def _python_contract(env: dict[str, str]) -> dict[str, str]:
     result = subprocess.run(
         [
-            "python3",
+            sys.executable,
             "-c",
             "import json; from career_ops.paths import resolve_paths; "
             "p = resolve_paths(); "
@@ -49,7 +54,7 @@ def _node_contract(env: dict[str, str]) -> dict[str, str]:
         "config: p.CONFIG_DIR, data: p.DATA_DIR, output: p.OUTPUT_DIR, scripts: p.SCRIPTS_DIR}))"
     )
     result = subprocess.run(
-        ["node", "--input-type=module", "-e", script],
+        [NODE, "--input-type=module", "-e", script],
         env=env,
         text=True,
         capture_output=True,

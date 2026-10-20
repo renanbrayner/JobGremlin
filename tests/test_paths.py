@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from career_ops.paths import REPO_ROOT, resolve_paths
+from career_ops.paths import REPO_ROOT, expand_path, load_environment, resolve_paths
 
 
 def _clean_environ(monkeypatch, tmp_path: Path) -> None:
@@ -118,6 +118,38 @@ def test_env_file_can_live_under_a_custom_config_directory(tmp_path):
 
     assert paths.config == config
     assert paths.data == workspace / "custom-data"
+
+
+def test_configured_values_expand_like_env_file_entries(tmp_path):
+    environment = {
+        "HOME": str(tmp_path / "home"),
+        "CAREER_OPS_OUTPUT": str(tmp_path / "workspace" / "output"),
+    }
+
+    assert expand_path("$CAREER_OPS_OUTPUT/cv.pdf", environment) == (
+        tmp_path / "workspace" / "output" / "cv.pdf"
+    )
+    assert expand_path("~/cv.pdf", environment) == tmp_path / "home" / "cv.pdf"
+
+
+def test_load_environment_exposes_the_same_precedence_to_other_modules(tmp_path):
+    workspace = tmp_path / "workspace"
+    (workspace / "config").mkdir(parents=True)
+    (workspace / "config" / "career-ops.env").write_text(
+        "FROM_FILE=file\nEXPLICIT=file\n", encoding="utf-8"
+    )
+
+    values = load_environment(
+        {
+            "HOME": str(tmp_path / "home"),
+            "CAREER_OPS_HOME": str(workspace),
+            "EXPLICIT": "environment",
+        }
+    )
+
+    assert values["FROM_FILE"] == "file"
+    assert values["EXPLICIT"] == "environment"
+    assert values["CAREER_OPS_HOME"] == str(workspace)
 
 
 def test_writable_guard_still_refuses_upstream_nested_under_home(tmp_path):

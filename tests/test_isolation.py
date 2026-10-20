@@ -21,12 +21,26 @@ def test_workspace_commands_never_write_to_upstream(run, workspace, fake_upstrea
         encoding="utf-8",
     )
     Path(f"{pool}.raw").write_text("1001|Desenvolvedor React\treact\n", encoding="utf-8")
+    cv = workspace / "output" / "cv-run-isolation.pdf"
+    cv.write_bytes(b"%PDF")
     before = _snapshot(fake_upstream)
 
     assert run("career-ops-triage", str(pool), "--json").returncode == 0
     assert run("career-ops-pool-fix-titles", str(pool)).returncode == 0
     assert run("career-ops-enrich").returncode == 2
     assert run("career-ops-cv", "--slug", "iso", "--no-pdf").returncode == 0
+    assert (
+        run(
+            "career-ops-run",
+            "--job",
+            "4411222",
+            "--cv",
+            str(cv),
+            "--adapter",
+            "fake",
+        ).returncode
+        == 0
+    )
 
     assert _snapshot(fake_upstream) == before
 
@@ -70,11 +84,25 @@ def test_commands_do_not_touch_home_sensitive_locations(run, env, workspace, tmp
     pool.write_text(
         "id\ttitle\tkeyword\n1001\tDesenvolvedor React\treact\n", encoding="utf-8"
     )
+    cv = workspace / "output" / "cv-home-isolation.pdf"
+    cv.write_bytes(b"%PDF")
     before = _snapshot(home)
 
     assert run("career-ops-triage", str(pool), "--json").returncode == 0
     assert run("career-ops-browser", "--check").returncode == 0
     assert run("career-ops-cv", "--slug", "home", "--no-pdf").returncode == 0
+    assert (
+        run(
+            "career-ops-run",
+            "--job",
+            "4411222",
+            "--cv",
+            str(cv),
+            "--adapter",
+            "fake",
+        ).returncode
+        == 0
+    )
 
     assert _snapshot(home) == before
 
