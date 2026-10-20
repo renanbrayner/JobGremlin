@@ -20,6 +20,7 @@ from typing import Callable, Mapping, Sequence
 
 from career_ops import cli
 from career_ops.adapter import PendingQuestion
+from career_ops.catalog import format_examples, format_exit_codes
 from career_ops.fake_adapter import FAKE_SCENARIOS, FakeApplicationAdapter, FakeScenario
 from career_ops.parked import ANSWERS_FILENAME, ParkedForm, ParkedFormStore
 from career_ops.paths import WorkspacePaths, expand_path, load_environment, resolve_paths
@@ -39,6 +40,69 @@ EXIT_FAILED = 1
 EXIT_USAGE = 2
 EXIT_PRECONDITION = 3
 EXIT_WAITING_INPUT = 6
+
+SUMMARY = "Answer a parked LinkedIn form and resume it in one call."
+
+EXIT_CODES = (
+    (EXIT_VERIFIED, "LinkedIn confirmed the resumed application"),
+    (EXIT_FAILED, "the form resumed but the application failed or was not confirmed"),
+    (
+        EXIT_USAGE,
+        "invalid arguments or an answer that does not match a pending question",
+    ),
+    (
+        EXIT_PRECONDITION,
+        "no parked form, token/run/job mismatch, lost CV or answers file unwritable",
+    ),
+    (
+        EXIT_WAITING_INPUT,
+        "the resumed form stopped on another unknown question (still parked)",
+    ),
+)
+
+EXAMPLES = (
+    "career-ops-reply --run-id daily-2026-10-20 --job 4411222 --token a1b2c3 \\\n"
+    '    --answer "Are you authorized to work?=Yes"',
+    "career-ops-reply --run-id daily-2026-10-20 --job 4411222 --token a1b2c3 \\\n"
+    '    --answer "Are you authorized to work?=Yes" --adapter fake '
+    "--fake-scenario success",
+    "career-ops-reply --help",
+)
+
+OUTPUT_SCHEMA = {
+    "format": "json",
+    "schema": {
+        "type": "object",
+        "required": [
+            "command",
+            "status",
+            "run_id",
+            "job",
+            "result",
+            "failure",
+            "artifacts",
+            "cv",
+            "waiting_input",
+            "answers",
+        ],
+        "properties": {
+            "command": {"const": COMMAND},
+            "status": {"type": "string", "enum": ["verified", "failed"]},
+            "run_id": {"type": ["string", "null"]},
+            "job": {"type": "object"},
+            "result": {"type": "object"},
+            "failure": {"type": ["object", "null"]},
+            "artifacts": {"type": "object"},
+            "cv": {"type": ["string", "null"]},
+            "waiting_input": {"type": ["object", "null"]},
+            "answers": {"type": ["object", "null"]},
+            "run": {"type": "object"},
+            "queue": {"type": "object"},
+            "parked_form_error": {"type": "string"},
+        },
+        "additionalProperties": True,
+    },
+}
 
 _HELP_EPILOG = """\
 Resume the LinkedIn form that is parked after `career-ops-run` exited 6.
@@ -66,20 +130,9 @@ Output (stdout is always one JSON object) includes:
   command, status, run_id, job, result, failure, artifacts, cv, waiting_input
   and answers: {"path": "...", "written": ["question", ...]}.
 
-Exit codes:
-  0  LinkedIn confirmed the resumed application
-  1  the form resumed but the application failed or was not confirmed
-  2  invalid arguments or an answer that does not match a pending question
-  3  no parked form, token/run/job mismatch, lost CV or answers file unwritable
-  6  the resumed form stopped on another unknown question (still parked)
-
-Examples:
-  career-ops-reply --run-id daily-2026-10-20 --job 4411222 --token a1b2c3 \\
-    --answer "Are you authorized to work?=Yes"
-  career-ops-reply --run-id daily-2026-10-20 --job 4411222 --token a1b2c3 \\
-    --answer "Are you authorized to work?=Yes" --adapter fake --fake-scenario success
-  career-ops-reply --help
-"""
+""" + "Exit codes:\n" + format_exit_codes(EXIT_CODES) + "\nExamples:\n" + format_examples(
+    EXAMPLES
+)
 
 
 class InvalidAnswer(ValueError):

@@ -24,6 +24,7 @@ from career_ops.adapter import (
     PendingQuestion,
     WaitingForInput,
 )
+from career_ops.catalog import format_examples, format_exit_codes
 from career_ops.cv_cache import CvCache, CvCacheRules, CvDecision, CvSelector
 from career_ops.cv_tailoring import CommandCvTailor, CvGenerationError, CvTailor, FakeCvTailor
 from career_ops.eligibility import EligibilityRules
@@ -83,6 +84,86 @@ _BLOCKER_MESSAGES = {
     "already_applied": "LinkedIn already shows an application for this job",
     "job_closed": "the job is no longer accepting applications",
     "no_easy_apply": "the job does not offer Easy Apply",
+}
+
+SUMMARY = (
+    "Apply to one explicit LinkedIn job or run the daily loop over a candidate queue."
+)
+
+EXIT_CODES = (
+    (EXIT_VERIFIED, "LinkedIn confirmed the application (the verified target was reached)"),
+    (
+        EXIT_FAILED,
+        "the target was not reached (queue exhausted, time budget, daily limit or\n"
+        "the last application failed), including when no candidate was eligible",
+    ),
+    (EXIT_USAGE, "invalid command-line arguments or an invalid candidate file"),
+    (
+        EXIT_PRECONDITION,
+        "missing CV/answers/candidates/JD source, invalid configuration or another\n"
+        "run holding data/run.lock",
+    ),
+    (
+        EXIT_WAITING_INPUT,
+        "the candidate queue was exhausted while a form was waiting for an answer\n"
+        "(the parked form is left open; answer it with career-ops-reply)",
+    ),
+)
+
+EXAMPLES = (
+    "career-ops-run --job 4411222 --cv output/cv-renan-react.pdf",
+    "career-ops-run --job 4411222 --cv output/cv-renan-react.pdf --adapter fake",
+    "career-ops-run --candidates data/candidates.json --cv output/cv-renan-react.pdf",
+    "career-ops-run --candidates data/candidates.json --jd-dir data/jd-fixtures \\\n"
+    "    --adapter fake --run-id queue-demo",
+    "career-ops-run --candidates data/candidates.json --jd-dir data/jd-fixtures \\\n"
+    "    --adapter fake --target 20 --max-seconds 14400 --run-id daily-2026-10-20",
+    'career-ops-run --candidates data/candidates.json --requeue-reason "jd now available"',
+    "career-ops-run --help",
+)
+
+OUTPUT_SCHEMA = {
+    "format": "json",
+    "schema": {
+        "type": "object",
+        "required": [
+            "command",
+            "status",
+            "run_id",
+            "job",
+            "result",
+            "failure",
+            "artifacts",
+            "cv",
+            "waiting_input",
+        ],
+        "properties": {
+            "command": {"const": COMMAND},
+            "status": {"type": "string", "enum": ["verified", "failed"]},
+            "run_id": {"type": ["string", "null"]},
+            "target": {"type": "integer"},
+            "submitted": {"type": "integer"},
+            "verified": {"type": "integer"},
+            "waiting": {"type": "integer"},
+            "attempts": {"type": "integer"},
+            "stop_reason": {"type": "string"},
+            "job": {"type": "object"},
+            "result": {"type": "object"},
+            "failure": {"type": ["object", "null"]},
+            "artifacts": {"type": "object"},
+            "cv": {"type": ["string", "null"]},
+            "waiting_input": {"type": ["object", "null"]},
+            "run": {"type": "object"},
+            "report": {"type": ["object", "null"]},
+            "report_error": {"type": ["object", "null"]},
+            "retention": {"type": "object"},
+            "summary": {"type": "object"},
+            "cv_cache": {"type": "object"},
+            "queue": {"type": "object"},
+            "applications": {"type": "array"},
+        },
+        "additionalProperties": True,
+    },
 }
 
 _HELP_EPILOG = """\
@@ -190,27 +271,9 @@ threshold defaults to 0.90 and can be set in config/cv-cache.json,
 CAREER_OPS_CV_MIN_SCORE or --cv-min-score. The upstream openai-tailor runs only
 on a cache miss; a CV containing the company name is rejected.
 
-Exit codes:
-  0  LinkedIn confirmed the application (the verified target was reached)
-  1  the target was not reached (queue exhausted, time budget, daily limit or
-     the last application failed), including when no candidate was eligible
-  2  invalid command-line arguments or an invalid candidate file
-  3  missing CV/answers/candidates/JD source, invalid configuration or another
-     run holding data/run.lock
-  6  the candidate queue was exhausted while a form was waiting for an answer
-     (the parked form is left open; answer it with career-ops-reply)
-
-Examples:
-  career-ops-run --job 4411222 --cv output/cv-renan-react.pdf
-  career-ops-run --job 4411222 --cv output/cv-renan-react.pdf --adapter fake
-  career-ops-run --candidates data/candidates.json --cv output/cv-renan-react.pdf
-  career-ops-run --candidates data/candidates.json --jd-dir data/jd-fixtures \\
-    --adapter fake --run-id queue-demo
-  career-ops-run --candidates data/candidates.json --jd-dir data/jd-fixtures \\
-    --adapter fake --target 20 --max-seconds 14400 --run-id daily-2026-10-20
-  career-ops-run --candidates data/candidates.json --requeue-reason "jd now available"
-  career-ops-run --help
-
+""" + "Exit codes:\n" + format_exit_codes(EXIT_CODES) + "\nExamples:\n" + format_examples(
+    EXAMPLES
+) + """
 The real adapter needs an authenticated CDP browser already running (see the
 README).  It never changes the Hermes files, ~/.local/bin or the upstream
 career-ops checkout.

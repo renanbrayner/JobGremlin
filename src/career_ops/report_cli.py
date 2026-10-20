@@ -14,6 +14,7 @@ import argparse
 import json
 from typing import Mapping, Sequence
 
+from career_ops.catalog import format_examples, format_exit_codes
 from career_ops.paths import load_environment, resolve_paths
 from career_ops.report import (
     DEFAULT_RETENTION_RUNS,
@@ -29,6 +30,49 @@ EXIT_OK = 0
 EXIT_FAILED = 1
 EXIT_USAGE = 2
 EXIT_PRECONDITION = 3
+
+SUMMARY = "Rebuild one run's Markdown/HTML report, summaries and retention."
+
+EXIT_CODES = (
+    (EXIT_OK, "reports generated"),
+    (EXIT_FAILED, "the requested run does not exist or is unreadable"),
+    (EXIT_USAGE, "invalid command-line arguments"),
+    (EXIT_PRECONDITION, "invalid workspace configuration or a retention failure"),
+)
+
+EXAMPLES = (
+    "career-ops-report --run-id daily-2026-10-20",
+    "career-ops-report --run-id daily-2026-10-20 --json",
+    "career-ops-report --run-id daily-2026-10-20 --keep 5",
+    "career-ops-report --run-id daily-2026-10-20 --no-prune",
+    "career-ops-report --help",
+)
+
+OUTPUT_SCHEMA = {
+    "format": "text (default) or json (--json)",
+    "schema": {
+        "type": "object",
+        "required": [
+            "command",
+            "status",
+            "run_id",
+            "summary",
+            "jobs",
+            "artifacts",
+            "retention",
+        ],
+        "properties": {
+            "command": {"const": COMMAND},
+            "status": {"type": "string"},
+            "run_id": {"type": "string"},
+            "summary": {"type": "object"},
+            "jobs": {"type": "array"},
+            "artifacts": {"type": "object"},
+            "retention": {"type": "object"},
+        },
+        "additionalProperties": True,
+    },
+}
 
 _HELP_EPILOG = """\
 Output (stdout):
@@ -47,19 +91,9 @@ requested run outside the window is reported first and then removed. No file
 from Hermes, the cron, ~/.local/bin or the upstream career-ops checkout is read
 or written.
 
-Exit codes:
-  0  reports generated
-  1  the requested run does not exist or is unreadable
-  2  invalid command-line arguments
-  3  invalid workspace configuration or a retention failure
-
-Examples:
-  career-ops-report --run-id daily-2026-10-20
-  career-ops-report --run-id daily-2026-10-20 --json
-  career-ops-report --run-id daily-2026-10-20 --keep 5
-  career-ops-report --run-id daily-2026-10-20 --no-prune
-  career-ops-report --help
-"""
+""" + "Exit codes:\n" + format_exit_codes(EXIT_CODES) + "\nExamples:\n" + format_examples(
+    EXAMPLES
+)
 
 
 def build_parser() -> argparse.ArgumentParser:

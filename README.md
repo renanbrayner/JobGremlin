@@ -35,7 +35,7 @@ outputs próprios, e a suíte pytest roda localmente.
 ├── scripts/             # cópias isoladas dos scripts do fluxo
 │   ├── check            # pytest + mypy + ruff
 │   └── lib/             # contrato compartilhado de caminhos (bash/node/python)
-├── src/career_ops/      # pacote Python (contratos reutilizáveis; CLI nos próximos tickets)
+├── src/career_ops/      # pacote Python (CLI e contratos reutilizáveis)
 ├── tests/               # pytest: paths, smoke dos comandos e isolamento
 ├── docs/adr/            # decisões de arquitetura
 ├── docs/agents/         # convenções para agentes
@@ -118,6 +118,8 @@ Os testes cobrem:
 - relatório diário: funil, descartes por motivo, decisões de CV, status e
   duração por vaga, thumbnails no HTML, resumo texto/JSON e retenção das três
   últimas sessões completas;
+- help: visão humana, catálogo JSON gerado do registro, `--help` de cada comando
+  e validação do catálogo contra `docs/schema/help-catalog.schema.json`;
 - o adaptador real embrulha `jobinfo`/`easyapply`/`cdp` sem alterar os scripts;
 - garantia de que os comandos não alteram o upstream falso.
 
@@ -653,6 +655,32 @@ Vídeo é opcional e desligado por padrão. Com `--video` (ou
 `output/sessions/<run_id>/video.mp4`; se a ferramenta de captura não estiver
 disponível, a rodada continua normalmente e o relatório apenas omite o vídeo.
 
+## Help e catálogo de comandos (`career-ops-help`)
+
+`career-ops-help` mostra a visão humana dos comandos disponíveis. `--json`
+devolve o catálogo legível por máquina que o Hermes pode consumir sem
+engenharia reversa:
+
+```bash
+scripts/career-ops-help
+scripts/career-ops-help --json
+scripts/career-ops-help --help
+scripts/career-ops-run --help
+```
+
+O catálogo é gerado a partir do registro de comandos
+(`career_ops.catalog.REGISTRY`), não de uma lista paralela: cada comando
+contribui com o parser argparse (uso, argumentos e opções) e com os metadados
+`SUMMARY`, `EXAMPLES`, `EXIT_CODES` e `OUTPUT_SCHEMA` do próprio módulo. Cada
+entrada traz nome, descrição, uso, argumentos, opções, exemplos, exit codes e o
+schema da saída JSON. O schema do próprio catálogo está em
+`docs/schema/help-catalog.schema.json` e é validado pela suíte.
+
+O help e o catálogo declaram explicitamente que o sistema roda em paralelo e
+isolado: nada em Hermes, cron, allowlist, `~/.local/bin` ou no checkout atual
+do `career-ops` é alterado. O comando não resolve caminhos do workspace nem
+abre o navegador.
+
 ## Navegador em paralelo
 
 Por padrão os scripts usam o mesmo perfil e a mesma porta CDP do sistema atual
@@ -668,10 +696,10 @@ CDP_PORT=9334 scripts/career-ops-browser
 
 - `career-ops-run` já aplica uma vaga explícita ou executa o loop diário sobre
   uma lista persistente, com cache/geração de CV, lock, retomada e meta
-  verificada. `career-ops-reply` responde ao formulário estacionado e
-  `career-ops-report` regenera o relatório e aplica retenção.
-  `career-ops-status` e `career-ops-help --json` ainda são construídos nos
-  próximos tickets.
+  verificada. `career-ops-reply` responde ao formulário estacionado,
+  `career-ops-report` regenera o relatório e aplica retenção, e
+  `career-ops-help` (com `--json`) documenta o contrato de todos os comandos.
+  `career-ops-status` ainda será construído em um próximo ticket.
 - O build de CV delega aos helpers do upstream (`openai-tailor.mjs` e
   `generate-pdf.mjs`), copiando `cv.md`/`config/profile.yml` para um staging root
   do workspace. O tailor real é validado por testes com runner injetado e pelo

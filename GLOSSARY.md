@@ -128,6 +128,17 @@ _Avoid_: waiting queue
 file and resumes the **Parked form** on its stored target.
 _Avoid_: submit (a reply resumes a form; it does not bypass the CV/submit guard)
 
+**Command registry**:
+The single list of command modules in `career_ops.catalog.REGISTRY` from which
+`career-ops-help` renders both the human overview and the JSON catalog.
+_Avoid_: command list (a second hand-maintained list would drift from the CLI)
+
+**Catalog**:
+The machine-readable JSON returned by `career-ops-help --json`: for each command
+its name, description, arguments, options, examples, exit codes and output
+schema.
+_Avoid_: help (the human overview is a separate rendering)
+
 ## Relationships
 
 - A **Run** contains one or more **Sessions**.

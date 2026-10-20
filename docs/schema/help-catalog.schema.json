@@ -1,0 +1,144 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jobgremlin.local/schemas/help-catalog.schema.json",
+  "title": "career-ops-help --json catalog",
+  "description": "Machine-readable command catalog consumed by Hermes.",
+  "type": "object",
+  "required": ["command", "schema_version", "isolation", "commands"],
+  "additionalProperties": false,
+  "properties": {
+    "command": { "const": "career-ops-help" },
+    "schema_version": { "const": 1 },
+    "isolation": {
+      "type": "object",
+      "required": ["parallel", "summary", "does_not_change", "writes"],
+      "additionalProperties": false,
+      "properties": {
+        "parallel": { "type": "boolean" },
+        "summary": { "type": "string", "minLength": 1 },
+        "does_not_change": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "writes": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "commands": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "name",
+          "summary",
+          "description",
+          "usage",
+          "arguments",
+          "options",
+          "examples",
+          "exit_codes",
+          "output"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "name": { "type": "string", "pattern": "^career-ops-[a-z-]+$" },
+          "summary": { "type": "string", "minLength": 1 },
+          "description": { "type": "string", "minLength": 1 },
+          "usage": { "type": "string", "pattern": "^usage:" },
+          "arguments": {
+            "type": "array",
+            "items": { "$ref": "#/$defs/parameter" }
+          },
+          "options": {
+            "type": "array",
+            "minItems": 1,
+            "items": { "$ref": "#/$defs/parameter" }
+          },
+          "examples": {
+            "type": "array",
+            "minItems": 1,
+            "items": { "type": "string", "minLength": 1 }
+          },
+          "exit_codes": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "required": ["code", "meaning"],
+              "additionalProperties": false,
+              "properties": {
+                "code": { "type": "integer" },
+                "meaning": { "type": "string", "minLength": 1 }
+              }
+            }
+          },
+          "output": {
+            "type": "object",
+            "required": ["format", "schema"],
+            "additionalProperties": false,
+            "properties": {
+              "format": { "type": "string", "minLength": 1 },
+              "schema": {
+                "type": "object",
+                "required": ["type", "required", "properties"],
+                "properties": {
+                  "type": { "const": "object" },
+                  "required": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": { "type": "string", "minLength": 1 }
+                  },
+                  "properties": { "type": "object", "minProperties": 1 },
+                  "additionalProperties": { "type": "boolean" }
+                },
+                "additionalProperties": true
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "parameter": {
+      "type": "object",
+      "required": [
+        "name",
+        "names",
+        "dest",
+        "required",
+        "type",
+        "action",
+        "default",
+        "choices",
+        "metavar",
+        "help"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "pattern": "^--?[a-z][a-z0-9-]*$" },
+        "names": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "pattern": "^-{1,2}[a-z][a-z0-9-]*$" }
+        },
+        "dest": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+        "required": { "type": "boolean" },
+        "type": { "enum": ["string", "integer", "number", "boolean"] },
+        "action": { "type": "string", "minLength": 1 },
+        "default": {},
+        "choices": {
+          "type": ["array", "null"],
+          "items": { "type": "string" }
+        },
+        "metavar": { "type": ["string", "null"] },
+        "help": { "type": ["string", "null"] }
+      }
+    }
+  }
+}
