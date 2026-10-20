@@ -38,7 +38,16 @@
         "report.html": "output/rehearsals/2026-10-20/workspace/output/sessions/rehearsal-one-2026-10-20/report.html",
         "summary.txt": "output/rehearsals/2026-10-20/workspace/output/sessions/rehearsal-one-2026-10-20/summary.txt",
         "summary.json": "output/rehearsals/2026-10-20/workspace/output/sessions/rehearsal-one-2026-10-20/summary.json"
-      }
+      },
+      "results": [
+        {
+          "job_id": "101",
+          "state": "verified",
+          "reason": "verified",
+          "cv_reused": false,
+          "cv_id": "cv-frontend-react-typescript-pt-senior-8c3724b4647e"
+        }
+      ]
     },
     {
       "label": "3 vagas",
@@ -65,7 +74,51 @@
         "report.html": "output/rehearsals/2026-10-20/workspace/output/sessions/rehearsal-three-2026-10-20/report.html",
         "summary.txt": "output/rehearsals/2026-10-20/workspace/output/sessions/rehearsal-three-2026-10-20/summary.txt",
         "summary.json": "output/rehearsals/2026-10-20/workspace/output/sessions/rehearsal-three-2026-10-20/summary.json"
-      }
+      },
+      "results": [
+        {
+          "job_id": "201",
+          "state": "verified",
+          "reason": "verified",
+          "cv_reused": false,
+          "cv_id": "cv-backend-python-django-pt-senior-1084c1ad0167"
+        },
+        {
+          "job_id": "202",
+          "state": "title_rejected",
+          "reason": "title_qa",
+          "cv_reused": null,
+          "cv_id": null
+        },
+        {
+          "job_id": "203",
+          "state": "ineligible",
+          "reason": "location_hybrid",
+          "cv_reused": null,
+          "cv_id": null
+        },
+        {
+          "job_id": "204",
+          "state": "ineligible",
+          "reason": "family_not_targeted",
+          "cv_reused": null,
+          "cv_id": null
+        },
+        {
+          "job_id": "205",
+          "state": "verified",
+          "reason": "verified",
+          "cv_reused": true,
+          "cv_id": "cv-backend-python-django-pt-senior-1084c1ad0167"
+        },
+        {
+          "job_id": "206",
+          "state": "verified",
+          "reason": "verified",
+          "cv_reused": true,
+          "cv_id": "cv-backend-python-django-pt-senior-1084c1ad0167"
+        }
+      ]
     },
     {
       "label": "20 vagas",
@@ -92,7 +145,184 @@
         "report.html": "output/rehearsals/2026-10-20/workspace/output/sessions/rehearsal-twenty-2026-10-20/report.html",
         "summary.txt": "output/rehearsals/2026-10-20/workspace/output/sessions/rehearsal-twenty-2026-10-20/summary.txt",
         "summary.json": "output/rehearsals/2026-10-20/workspace/output/sessions/rehearsal-twenty-2026-10-20/summary.json"
-      }
+      },
+      "results": [
+        {
+          "job_id": "301",
+          "state": "verified",
+          "reason": "verified",
+          "cv_reused": false,
+          "cv_id": "cv-fullstack-react-node-js-pt-senior-b6e96d560209"
+        },
+        {
+          "job_id": "302",
+          "state": "verified",
+          "reason": "verified",
+          "cv_reused": true,
+          "cv_id": "cv-fullstack-react-node-js-pt-senior-b6e96d560209"
+        },
+        {
+          "job_id": "303",
+          "state": "verified",
+          "reason": "verified",
+          "cv_reused": true,
+          "cv_id": "cv-fullstack-react-node-js-pt-senior-b6e96d560209"
+        },
+        {
+          "job_id": "304",
+          "state": "verified",
+          "reason": "verified",
+          "cv_reused": true,
+          "cv_id": "cv-fullstack-react-node-js-pt-senior-b6e96d560209"
+        },
+        {
+          "job_id": "305",
+          "state": "verified",
+          "reason": "verified",
+          "cv_reused": true,
+          "cv_id": "cv-fullstack-react-node-js-pt-senior-b6e96d560209"
+        },
+        {
+          "job_id": "306",
+          "state": "verified",
+          "reason": "verified",
+          "cv_reused": true,
+          "cv_id": "cv-fullstack-react-node-js-pt-senior-b6e96d560209"
+        },
+        {
+          "job_id": "307",
+          "state": "verified",
+          "reason": "verified",
+          "cv_reused": true,
+          "cv_id": "cv-fullstack-react-node-js-pt-senior-b6e96d560209"
+        },
+        {
+          "job_id": "308",
+          "state": "verified",
+          "reason": "verified",
+          "cv_reused": true,
+          "cv_id": "cv-fullstack-react-node-js-pt-senior-b6e96d560209"
+        },
+        {
+          "job_id": "309",
+          "state": "verified",
+          "reason": "verified",
+          "cv_reused": true,
+          "cv_id": "cv-fullstack-react-node-js-pt-senior-b6e96d560209"
+        },
+        {
+          "job_id": "310",
+          "state": "verified",
+          "reason": "verified",
+          "cv_reused": true,
+          "cv_id": "cv-fullstack-react-node-js-pt-senior-b6e96d560209"
+        },
+        {
+          "job_id": "311",
+          "state": "verified",
+          "reason": "verified",
+          "cv_reused": true,
+          "cv_id": "cv-fullstack-react-node-js-pt-senior-b6e96d560209"
+        },
+        {
+          "job_id": "312",
+          "state": "verified",
+          "reason": "verified",
+          "cv_reused": true,
+          "cv_id": "cv-fullstack-react-node-js-pt-senior-b6e96d560209"
+        },
+        {
+          "job_id": "313",
+          "state": "verified",
+          "reason": "verified",
+          "cv_reused": true,
+          "cv_id": "cv-fullstack-react-node-js-pt-senior-b6e96d560209"
+        },
+        {
+          "job_id": "314",
+          "state": "verified",
+          "reason": "verified",
+          "cv_reused": true,
+          "cv_id": "cv-fullstack-react-node-js-pt-senior-b6e96d560209"
+        },
+        {
+          "job_id": "315",
+          "state": "verified",
+          "reason": "verified",
+          "cv_reused": true,
+          "cv_id": "cv-fullstack-react-node-js-pt-senior-b6e96d560209"
+        },
+        {
+          "job_id": "316",
+          "state": "verified",
+          "reason": "verified",
+          "cv_reused": true,
+          "cv_id": "cv-fullstack-react-node-js-pt-senior-b6e96d560209"
+        },
+        {
+          "job_id": "317",
+          "state": "verified",
+          "reason": "verified",
+          "cv_reused": true,
+          "cv_id": "cv-fullstack-react-node-js-pt-senior-b6e96d560209"
+        },
+        {
+          "job_id": "318",
+          "state": "verified",
+          "reason": "verified",
+          "cv_reused": true,
+          "cv_id": "cv-fullstack-react-node-js-pt-senior-b6e96d560209"
+        },
+        {
+          "job_id": "319",
+          "state": "verified",
+          "reason": "verified",
+          "cv_reused": true,
+          "cv_id": "cv-fullstack-react-node-js-pt-senior-b6e96d560209"
+        },
+        {
+          "job_id": "320",
+          "state": "verified",
+          "reason": "verified",
+          "cv_reused": true,
+          "cv_id": "cv-fullstack-react-node-js-pt-senior-b6e96d560209"
+        },
+        {
+          "job_id": "321",
+          "state": "new",
+          "reason": null,
+          "cv_reused": null,
+          "cv_id": null
+        },
+        {
+          "job_id": "322",
+          "state": "new",
+          "reason": null,
+          "cv_reused": null,
+          "cv_id": null
+        },
+        {
+          "job_id": "323",
+          "state": "new",
+          "reason": null,
+          "cv_reused": null,
+          "cv_id": null
+        },
+        {
+          "job_id": "324",
+          "state": "new",
+          "reason": null,
+          "cv_reused": null,
+          "cv_id": null
+        },
+        {
+          "job_id": "325",
+          "state": "new",
+          "reason": null,
+          "cv_reused": null,
+          "cv_id": null
+        }
+      ]
     }
   ],
   "comparison": {
@@ -100,7 +330,7 @@
     "rows": [
       {
         "metric": "unique_jobs",
-        "label": "Vagas únicas",
+        "label": "Vagas únicas na rodada",
         "baseline": 344,
         "values": [
           1,
@@ -180,6 +410,7 @@
           "~/.hermes"
         ],
         "commands": [],
+        "command_status": [],
         "present_before": true,
         "present_after": true,
         "changed": false,
@@ -191,6 +422,7 @@
           "~/.hermes/allowlist.json"
         ],
         "commands": [],
+        "command_status": [],
         "present_before": false,
         "present_after": false,
         "changed": false,
@@ -204,6 +436,12 @@
         "commands": [
           "crontab -l"
         ],
+        "command_status": [
+          {
+            "command": "crontab -l",
+            "available": false
+          }
+        ],
         "present_before": true,
         "present_after": true,
         "changed": false,
@@ -215,6 +453,7 @@
           "~/.local/bin"
         ],
         "commands": [],
+        "command_status": [],
         "present_before": true,
         "present_after": true,
         "changed": false,
@@ -226,6 +465,7 @@
           "~/.local/share/career-ops"
         ],
         "commands": [],
+        "command_status": [],
         "present_before": false,
         "present_after": false,
         "changed": false,

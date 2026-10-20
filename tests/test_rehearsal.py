@@ -119,7 +119,7 @@ def test_the_comparison_uses_the_19_10_baseline_and_the_funnel_decisions():
 
     assert "# Ensaio paralelo — 2026-10-20" in markdown
     assert "19/10" in markdown
-    assert "| Vagas únicas | 344 | 6 |" in markdown
+    assert "| Vagas únicas na rodada | 344 | 6 |" in markdown
     assert "| Verificadas | 0 | 3 |" in markdown
     assert "target_reached" in markdown
     assert "CV(s) gerado(s)" in markdown
@@ -182,22 +182,12 @@ def test_an_unchanged_isolation_result_is_shown_in_the_report():
 
 
 def test_the_rehearsal_script_runs_one_three_and_twenty_jobs_and_proves_isolation(
-    run, env, tmp_path
+    run, env, sensitive_home, tmp_path
 ):
-    home = tmp_path / "home"
-    (home / ".hermes").mkdir(parents=True)
-    (home / ".hermes" / "state.json").write_text("keep", encoding="utf-8")
-    (home / ".hermes" / "allowlist.json").write_text("[]", encoding="utf-8")
-    (home / ".local" / "bin").mkdir(parents=True)
-    (home / ".local" / "bin" / "tool").write_text("keep", encoding="utf-8")
-    (home / ".config" / "systemd" / "user").mkdir(parents=True)
-    (home / ".config" / "systemd" / "user" / "job.timer").write_text(
-        "keep", encoding="utf-8"
-    )
-    env["HOME"] = str(home)
+    env["HOME"] = str(sensitive_home)
 
     workspace = tmp_path / "rehearsal-workspace"
-    docs = tmp_path / "docs"
+    docs = workspace / "docs"
     result = run(
         "rehearsal",
         "--date",
@@ -222,6 +212,9 @@ def test_the_rehearsal_script_runs_one_three_and_twenty_jobs_and_proves_isolatio
     assert "19/10" in report
     assert "| Verificadas | 0 | 1 | 3 | 20 |" in report
     assert "inalterado" in report.lower()
+    assert "family_not_targeted" in report
+    assert "location_hybrid" in report
+    assert "reutilizado" in report
 
     one = workspace / "output" / "sessions" / "rehearsal-one-2026-10-20"
     assert (one / "report.md").is_file()

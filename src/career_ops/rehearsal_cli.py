@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Mapping, Sequence
 
 from career_ops.isolation import default_targets, take_snapshot
-from career_ops.paths import REPO_ROOT, load_environment, resolve_paths
+from career_ops.paths import REPO_ROOT, expand_path, load_environment, resolve_paths
 from career_ops.rehearsal import (
     RehearsalStep,
     render_rehearsal_report,
@@ -60,9 +60,9 @@ Requirements:
 - Kubernetes and Terraform.
 """
 
-ONE = "rehearsal-one"
-THREE = "rehearsal-three"
-TWENTY = "rehearsal-twenty"
+ROUND_ONE = "rehearsal-one"
+ROUND_THREE = "rehearsal-three"
+ROUND_TWENTY = "rehearsal-twenty"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -102,6 +102,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         else REPO_ROOT / "output" / "rehearsals" / date / "workspace"
     ).resolve()
     docs_dir = Path(args.docs_dir).resolve()
+    if not (docs_dir.is_relative_to(REPO_ROOT) or docs_dir.is_relative_to(workspace_root)):
+        return _fail(
+            f"--docs-dir must stay inside the repo or the rehearsal workspace: {docs_dir}"
+        )
 
     try:
         environment = load_environment(dict(os.environ))
@@ -109,12 +113,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     except ValueError as exc:
         return _fail(f"invalid workspace configuration: {exc}")
 
-    targets = default_targets(
-        current,
-        environ=environment,
-        home=_home(environment),
-    )
-    before = take_snapshot(targets)
+    home = _home(environment)
+    targets = default_targets(current, environ=environment, home=home)
+    before = take_snapshot(targets, home=home)
 
     try:
         _prepare_workspace(
@@ -136,7 +137,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (OSError, subprocess.SubprocessError, ValueError, KeyError) as exc:
         return _fail(f"{type(exc).__name__}: {exc}")
 
-    after = take_snapshot(targets)
+    after = take_snapshot(targets, home=home)
     isolation = after.compare(before)
     if not isolation["unchanged"]:
         changed = [
@@ -199,6 +200,10 @@ def _prepare_workspace(root: Path, *, protected: Sequence[Path]) -> None:
             raise RehearsalError(
                 f"refusing to replace {root}: it is inside the protected path {resolved}"
             )
+        if resolved.is_relative_to(root):
+            raise RehearsalError(
+                f"refusing to replace {root}: it contains the protected path {resolved}"
+            )
     if root.exists():
         shutil.rmtree(root)
     for name in ("config", "data", "output"):
@@ -229,12 +234,12 @@ def _run_environment(
 def _run_one(environment: Mapping[str, str], root: Path, date: str) -> RehearsalStep:
     candidates = _candidates(root, "one", [(101, "Desenvolvedor React", "Recife, PE", "Remote")])
     jds = _jds(root, "one", {"101": FRONTEND_JD})
-    return _invoke(
+    return _run_round(
         environment,
         candidates=candidates,
         jd_dir=jds,
         target=1,
-        run_id=f"{ONE}-{date}",
+        run_id=f"{ROUND_ONE}-{date}",
         expected=1,
         label="1 vaga",
     )
@@ -263,12 +268,12 @@ def _run_three(environment: Mapping[str, str], root: Path, date: str) -> Rehears
             "206": BACKEND_JD,
         },
     )
-    return _invoke(
+    return _run_round(
         environment,
         candidates=candidates,
         jd_dir=jds,
         target=3,
-        run_id=f"{THREE}-{date}",
+        run_id=f"{ROUND_THREE}-{date}",
         expected=3,
         label="3 vagas",
     )
@@ -288,18 +293,18 @@ def _run_twenty(environment: Mapping[str, str], root: Path, date: str) -> Rehear
         "twenty",
         {str(300 + index): FULLSTACK_JD for index in range(1, 26)},
     )
-    return _invoke(
+    return _run_round(
         environment,
         candidates=candidates,
         jd_dir=jds,
         target=20,
-        run_id=f"{TWENTY}-{date}",
+        run_id=f"{ROUND_TWENTY}-{date}",
         expected=20,
         label="20 vagas",
     )
 
 
-def _invoke(
+def _run_round(
     environment: Mapping[str, str],
     *,
     candidates: Path,
@@ -441,8 +446,7 @@ def _targets(isolation: Mapping[str, object]) -> list[Mapping[str, object]]:
 
 
 def _home(environment: Mapping[str, str]) -> Path:
-    raw = environment.get("HOME", "").strip()
-    return Path(raw) if raw else Path.home()
+    return expand_path("~", environment)
 
 
 def _fail(message: str) -> int:

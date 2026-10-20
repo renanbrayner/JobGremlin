@@ -27,10 +27,13 @@ class JobDescriptionError(RuntimeError):
     reason = "jd_fetch_failed"
 
 
+JD_MISSING_REASON = "jd_missing"
+
+
 class JobDescriptionMissing(JobDescriptionError):
     """The posting (or its description) is not available."""
 
-    reason = "jd_missing"
+    reason = JD_MISSING_REASON
 
 
 @dataclass(frozen=True)

@@ -72,12 +72,10 @@ def test_commands_refuse_to_write_into_upstream(run, fake_upstream, env):
     assert _snapshot(fake_upstream) == before
 
 
-def test_commands_do_not_touch_home_sensitive_locations(run, env, workspace, tmp_path):
-    home = tmp_path / "home"
-    (home / ".hermes").mkdir(parents=True)
-    (home / ".local" / "bin").mkdir(parents=True)
-    (home / ".hermes" / "state.json").write_text("keep", encoding="utf-8")
-    (home / ".local" / "bin" / "tool").write_text("keep", encoding="utf-8")
+def test_commands_do_not_touch_home_sensitive_locations(
+    run, env, workspace, sensitive_home
+):
+    home = sensitive_home
     env["HOME"] = str(home)
 
     pool = workspace / "data" / "pool-home.tsv"

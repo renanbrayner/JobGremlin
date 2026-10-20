@@ -101,6 +101,10 @@ _DEV_SIGNAL = re.compile(
     r"kotlin|swift|web dev\w*|dev web)\b"
 )
 
+LOCATION_REJECTION_REASONS = frozenset(
+    {"location_missing", "location_hybrid", "location_outside_region"}
+)
+
 _REMOTE = re.compile(r"\b(remot\w*|remote|home[\s-]?office|teletrabalho|anywhere)\b")
 _HYBRID = re.compile(r"\b(hibrid\w*|hybrid)\b")
 _ONSITE = re.compile(r"\b(on[\s-]?site|presencial|no local)\b")

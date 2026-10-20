@@ -219,6 +219,22 @@ def workspace(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
+def sensitive_home(tmp_path: Path) -> Path:
+    """A fake HOME with the paths the parallel flow must never change."""
+    home = tmp_path / "home"
+    (home / ".hermes").mkdir(parents=True)
+    (home / ".hermes" / "state.json").write_text("keep", encoding="utf-8")
+    (home / ".hermes" / "allowlist.json").write_text("[]", encoding="utf-8")
+    (home / ".local" / "bin").mkdir(parents=True)
+    (home / ".local" / "bin" / "tool").write_text("keep", encoding="utf-8")
+    (home / ".config" / "systemd" / "user").mkdir(parents=True)
+    (home / ".config" / "systemd" / "user" / "job.timer").write_text(
+        "keep", encoding="utf-8"
+    )
+    return home
+
+
+@pytest.fixture
 def fake_upstream(tmp_path: Path) -> Path:
     """A read-only stand-in for ~/.local/share/career-ops.
 

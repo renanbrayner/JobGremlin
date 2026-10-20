@@ -13,6 +13,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Sequence
 
+from career_ops.job_description import JD_MISSING_REASON
+from career_ops.job_filters import LOCATION_REJECTION_REASONS
+from career_ops.queue import TITLE_REJECTED_STATE
+
 BASELINE_DATE = "2026-10-19"
 BASELINE_2026_10_19: Mapping[str, object] = {
     "cards": 1950,
@@ -29,14 +33,12 @@ BASELINE_2026_10_19: Mapping[str, object] = {
     ),
 }
 
-_TITLE_STATE = "title_rejected"
-_LOCATION_REASONS = frozenset(
-    {"location_hybrid", "location_outside_region", "location_missing"}
-)
-_JD_MISSING = "jd_missing"
+_TITLE_STATE = TITLE_REJECTED_STATE
+_LOCATION_REASONS = LOCATION_REJECTION_REASONS
+_JD_MISSING = JD_MISSING_REASON
 
 _COMPARISON_ROWS: tuple[tuple[str, str], ...] = (
-    ("unique_jobs", "Vagas únicas"),
+    ("unique_jobs", "Vagas únicas na rodada"),
     ("shortlist", "Shortlist"),
     ("jds_read", "JDs lidas"),
     ("eligible", "Elegíveis"),
@@ -95,16 +97,17 @@ class RehearsalStep:
     def artifacts(self, *, root: Path | None = None) -> dict[str, str]:
         return _artifacts(self.summary, root=root)
 
-    def as_dict(self, *, root: Path | None = None) -> dict[str, object]:
-        return _StepPayload(
-            label=self.label,
-            run_id=self.run_id,
-            status=self.status,
-            stop_reason=self.stop_reason,
-            target=self.target,
-            metrics=self.metrics(),
-            artifacts=self.artifacts(root=root),
-        ).as_dict()
+    def results(self) -> tuple[Mapping[str, object], ...]:
+        return tuple(
+            {
+                "job_id": str(job.get("id") or ""),
+                "state": str(job.get("state") or "unknown"),
+                "reason": job.get("reason"),
+                "cv_reused": job.get("cv_reused"),
+                "cv_id": job.get("cv_id"),
+            }
+            for job in _jobs(self.summary)
+        )
 
 
 @dataclass(frozen=True)
@@ -116,6 +119,7 @@ class _StepPayload:
     target: int
     metrics: Mapping[str, int]
     artifacts: Mapping[str, str]
+    results: tuple[Mapping[str, object], ...]
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -126,6 +130,7 @@ class _StepPayload:
             "target": self.target,
             "metrics": dict(self.metrics),
             "artifacts": dict(self.artifacts),
+            "results": [dict(result) for result in self.results],
         }
 
 
@@ -164,6 +169,7 @@ def render_rehearsal_report(
             target=step.target,
             metrics=step.metrics(),
             artifacts=step.artifacts(root=root),
+            results=step.results(),
         )
         for step in steps
     ]
@@ -298,6 +304,29 @@ def _render_markdown(
                 "",
             ]
         )
+        if step_payload.results:
+            lines.extend(
+                [
+                    "| Vaga | Estado | Motivo | CV |",
+                    "| --- | --- | --- | --- |",
+                ]
+            )
+            for result in step_payload.results:
+                reuse = result.get("cv_reused")
+                cv_id = str(result.get("cv_id") or "—")
+                if reuse is True:
+                    cv_id = f"{cv_id} (reutilizado)"
+                elif reuse is False:
+                    cv_id = f"{cv_id} (gerado)"
+                lines.append(
+                    "| {job} | {state} | {reason} | {cv} |".format(
+                        job=result.get("job_id") or "—",
+                        state=result.get("state") or "—",
+                        reason=result.get("reason") or "—",
+                        cv=cv_id,
+                    )
+                )
+            lines.append("")
         if step_payload.artifacts:
             lines.extend(
                 [
@@ -321,10 +350,10 @@ def _render_markdown(
             ]
         )
     else:
-        result = "inalterado" if isolation.get("unchanged") else "ALTERADO"
+        overall = "inalterado" if isolation.get("unchanged") else "ALTERADO"
         lines.extend(
             [
-                f"Resultado geral: **{result}**.",
+                f"Resultado geral: **{overall}**.",
                 "",
                 "| Alvo | Caminhos e comandos | Resultado |",
                 "| --- | --- | --- |",
@@ -347,6 +376,12 @@ def _render_markdown(
                     status = "ausente (antes e depois), inalterado"
                 else:
                     status = "inalterado"
+                command_status = target.get("command_status")
+                if isinstance(command_status, list) and any(
+                    isinstance(item, Mapping) and not item.get("available")
+                    for item in command_status
+                ):
+                    status += " (comando indisponível)"
                 lines.append(f"| {target.get('name')} | {paths} | {status} |")
         lines.append("")
 

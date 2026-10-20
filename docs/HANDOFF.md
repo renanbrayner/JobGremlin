@@ -22,10 +22,12 @@ comandos e conferido pela suíte.
 - Cada vaga tem sessão observável (`session.json`, `events.jsonl`,
   screenshots) e cada rodada tem `report.md`, `report.html`, `summary.txt` e
   `summary.json`.
-- O ensaio paralelo executou 1, 3 e 20 vagas com o adaptador fake e provou que
-  Hermes, cron, allowlist, `~/.local/bin` e o checkout atual do career-ops
-  permaneceram inalterados. Veja
-  [`docs/rehearsals/2026-10-20.md`](rehearsals/2026-10-20.md).
+- O ensaio paralelo executou 1, 3 e 20 vagas com o adaptador fake e fez
+  fingerprint antes/depois de Hermes, cron, allowlist, `~/.local/bin` e do
+  checkout atual do career-ops. Os caminhos existentes permaneceram idênticos;
+  os ausentes neste ambiente foram registrados como ausentes antes e depois.
+  Veja [`docs/rehearsals/2026-10-20.md`](rehearsals/2026-10-20.md) e o JSON
+  `docs/rehearsals/2026-10-20.json`.
 
 ## Descobrindo a CLI (`career-ops-help --json`)
 
@@ -277,7 +279,12 @@ O ensaio faz um fingerprint **antes e depois** das três rodadas e compara:
 O resultado fica na seção “Verificação de isolamento” de
 [`docs/rehearsals/2026-10-20.md`](rehearsals/2026-10-20.md): **inalterado**.
 Alvos que não existem na máquina aparecem como “ausente (antes e depois)”,
-também sem alteração. Para repetir na máquina real:
+também sem alteração; um comando de leitura indisponível (por exemplo
+`crontab -l` ausente) é marcado como “comando indisponível”. Neste ambiente o
+checkout do career-ops e a allowlist não existem, então a prova real foi a
+ausência idêntica antes/depois. A suíte repete a prova com um `HOME` falso
+povoado, inclusive upstream, para exercitar o caminho de arquivos existentes.
+Para repetir na máquina real:
 
 ```bash
 # use os caminhos reais quando forem diferentes dos defaults
@@ -291,7 +298,9 @@ A suíte também prova o isolamento com um `HOME` temporário povoado com
 `~/.hermes`, allowlist, `~/.local/bin`, timers e upstream falso; nenhum
 comando escreve nesses caminhos. O sistema atual continua operando ao lado do
 novo porque o novo só escreve em `config/`, `data/` e `output/` deste repo e
-lê o upstream sem alterar.
+lê o upstream sem alterar. Neste ambiente o sistema antigo não está instalado,
+então não foi possível executá-lo para observar a coexistência; o que foi
+observado é que seus caminhos não foram tocados.
 
 ## Ensaio paralelo e linha de base
 

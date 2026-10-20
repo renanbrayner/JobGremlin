@@ -23,9 +23,9 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Mapping, Sequence
+from typing import Callable, Iterable, Mapping, Sequence
 
-from career_ops.paths import WorkspacePaths
+from career_ops.paths import WorkspacePaths, expand_path
 
 SNAPSHOT_VERSION = 1
 _COMMAND_TIMEOUT_SECONDS = 10.0
@@ -91,11 +91,23 @@ class IsolationSnapshot:
                 if before_entries.get(key) != after_entries.get(key)
             )
             target = after or before
+            command_status = [
+                {
+                    "command": command,
+                    "available": (
+                        _command_available(target, command)
+                        if target is not None
+                        else False
+                    ),
+                }
+                for command in (target.commands if target is not None else ())
+            ]
             results.append(
                 {
                     "name": name,
                     "paths": list(target.paths) if target is not None else [],
                     "commands": list(target.commands) if target is not None else [],
+                    "command_status": command_status,
                     "present_before": before.present if before is not None else False,
                     "present_after": after.present if after is not None else False,
                     "changed": bool(differences),
@@ -111,20 +123,21 @@ class IsolationSnapshot:
 def default_targets(
     paths: WorkspacePaths,
     *,
-    environ: Mapping[str, str] | None = None,
+    environ: Mapping[str, str],
     home: Path | None = None,
 ) -> tuple[IsolationTarget, ...]:
     """Resolve the current installation targets without writing to them."""
-    values = dict(os.environ if environ is None else environ)
-    home = home or _home(values)
-    allowlist = values.get("HERMES_ALLOWLIST", "").strip()
+    home = home or expand_path("~", environ)
+    allowlist = environ.get("HERMES_ALLOWLIST", "").strip()
     allowlist_path = (
-        _expand(allowlist, values) if allowlist else home / ".hermes" / "allowlist.json"
+        expand_path(allowlist, environ)
+        if allowlist
+        else home / ".hermes" / "allowlist.json"
     )
-    cron_file = values.get("HERMES_CRON", "").strip()
+    cron_file = environ.get("HERMES_CRON", "").strip()
     cron_paths = [home / ".config" / "systemd" / "user"]
     if cron_file:
-        cron_paths.append(_expand(cron_file, values))
+        cron_paths.append(expand_path(cron_file, environ))
     return (
         IsolationTarget("hermes", paths=(home / ".hermes",)),
         IsolationTarget("allowlist", paths=(allowlist_path,)),
@@ -138,7 +151,12 @@ def default_targets(
     )
 
 
-def take_snapshot(targets: Sequence[IsolationTarget]) -> IsolationSnapshot:
+def take_snapshot(
+    targets: Sequence[IsolationTarget],
+    *,
+    home: Path | None = None,
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> IsolationSnapshot:
     """Read every target without modifying it."""
     snapshots: dict[str, TargetSnapshot] = {}
     for target in targets:
@@ -146,10 +164,10 @@ def take_snapshot(targets: Sequence[IsolationTarget]) -> IsolationSnapshot:
         for path in target.paths:
             _snapshot_path(path, entries)
         for command in target.commands:
-            entries[f"$ {' '.join(command)}"] = _snapshot_command(command)
+            entries[f"$ {' '.join(command)}"] = _snapshot_command(command, runner)
         snapshots[target.name] = TargetSnapshot(
             name=target.name,
-            paths=tuple(_display(path) for path in target.paths),
+            paths=tuple(_display(path, home) for path in target.paths),
             commands=tuple(" ".join(command) for command in target.commands),
             entries=entries,
         )
@@ -223,11 +241,14 @@ def _file_entry(path: Path) -> Mapping[str, object]:
     }
 
 
-def _snapshot_command(command: Sequence[str]) -> Mapping[str, object]:
+def _snapshot_command(
+    command: Sequence[str],
+    runner: Callable[..., subprocess.CompletedProcess[str]],
+) -> Mapping[str, object]:
     if shutil.which(command[0]) is None:
         return {"kind": "command", "available": False}
     try:
-        completed = subprocess.run(
+        completed = runner(
             list(command),
             text=True,
             capture_output=True,
@@ -257,6 +278,15 @@ def _unreadable(error: OSError) -> Mapping[str, object]:
     return {"kind": "unreadable", "error": f"{type(error).__name__}: {error}"}
 
 
+def _command_available(target: TargetSnapshot, command: str) -> bool:
+    entry = target.entries.get(f"$ {command}")
+    return bool(
+        isinstance(entry, Mapping)
+        and entry.get("kind") == "command"
+        and entry.get("available")
+    )
+
+
 def _present(entries: Iterable[Mapping[str, object]]) -> bool:
     for entry in entries:
         kind = entry.get("kind")
@@ -267,19 +297,9 @@ def _present(entries: Iterable[Mapping[str, object]]) -> bool:
     return False
 
 
-def _home(environ: Mapping[str, str]) -> Path:
-    raw = environ.get("HOME", "").strip()
-    return Path(raw) if raw else Path.home()
-
-
-def _expand(raw: str, environ: Mapping[str, str]) -> Path:
-    if raw == "~" or raw.startswith("~/"):
-        return _home(environ) / raw[2:] if raw != "~" else _home(environ)
-    return Path(raw)
-
-
-def _display(path: Path) -> str:
-    home = Path.home()
+def _display(path: Path, home: Path | None) -> str:
+    if home is None:
+        return str(path)
     try:
         relative = path.relative_to(home)
     except ValueError:

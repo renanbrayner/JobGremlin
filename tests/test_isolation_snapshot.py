@@ -1,45 +1,15 @@
 from __future__ import annotations
 
+import subprocess
 import sys
-from pathlib import Path
 
 from career_ops.isolation import IsolationTarget, default_targets, take_snapshot
-from career_ops.paths import WorkspacePaths
 
 
-def _paths(tmp_path: Path) -> WorkspacePaths:
-    workspace = tmp_path / "workspace"
-    upstream = tmp_path / "upstream"
-    for directory in (
-        workspace / "config",
-        workspace / "data",
-        workspace / "output",
-        upstream,
-    ):
-        directory.mkdir(parents=True)
-    return WorkspacePaths(
-        home=workspace,
-        upstream=upstream,
-        config=workspace / "config",
-        data=workspace / "data",
-        output=workspace / "output",
-        scripts=workspace / "scripts",
-    )
-
-
-def _home(tmp_path: Path) -> Path:
-    home = tmp_path / "home"
-    (home / ".hermes").mkdir(parents=True)
-    (home / ".hermes" / "state.json").write_text("keep", encoding="utf-8")
-    (home / ".hermes" / "allowlist.json").write_text("[]", encoding="utf-8")
-    (home / ".local" / "bin").mkdir(parents=True)
-    (home / ".local" / "bin" / "tool").write_text("keep", encoding="utf-8")
-    return home
-
-
-def test_the_default_targets_cover_hermes_cron_allowlist_local_bin_and_upstream(tmp_path):
-    paths = _paths(tmp_path)
-    home = _home(tmp_path)
+def test_the_default_targets_cover_hermes_cron_allowlist_local_bin_and_upstream(
+    paths, sensitive_home
+):
+    home = sensitive_home
 
     targets = default_targets(paths, environ={}, home=home)
     names = {target.name for target in targets}
@@ -57,9 +27,10 @@ def test_the_default_targets_cover_hermes_cron_allowlist_local_bin_and_upstream(
     assert upstream.paths == (paths.upstream,)
 
 
-def test_the_allowlist_path_can_be_overridden_for_the_real_installation(tmp_path):
-    paths = _paths(tmp_path)
-    home = _home(tmp_path)
+def test_the_allowlist_path_can_be_overridden_for_the_real_installation(
+    paths, sensitive_home, tmp_path
+):
+    home = sensitive_home
     custom = tmp_path / "custom-allowlist.json"
     custom.write_text("{}", encoding="utf-8")
 
@@ -141,14 +112,21 @@ def test_absent_paths_are_still_compared(tmp_path):
 
 
 def test_command_targets_compare_command_output(tmp_path):
+    calls: list[list[str]] = []
+
+    def runner(argv, **kwargs):
+        calls.append(list(argv))
+        return subprocess.CompletedProcess(argv, 0, "fixed crontab\n", "")
+
     target = IsolationTarget(
         "cron",
         commands=((sys.executable, "-c", "print('fixed crontab')"),),
     )
-    before = take_snapshot([target])
-    after = take_snapshot([target])
+    before = take_snapshot([target], runner=runner)
+    after = take_snapshot([target], runner=runner)
 
     assert before.compare(after)["unchanged"] is True
+    assert len(calls) == 2
     entry = next(iter(before.as_dict()["targets"]["cron"]["entries"].values()))
     assert entry["kind"] == "command"
     assert entry["returncode"] == 0

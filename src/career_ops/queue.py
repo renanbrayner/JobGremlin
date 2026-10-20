@@ -24,6 +24,7 @@ from career_ops.paths import WorkspacePaths
 QUEUE_FILENAME = "queue.json"
 JD_DIRNAME = "jds"
 QUEUE_VERSION = 1
+TITLE_REJECTED_STATE = "title_rejected"
 
 # Terminal for the queue: these ids do not return without an explicit reason.
 _BLOCKING_STATES = frozenset(
