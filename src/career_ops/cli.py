@@ -24,7 +24,7 @@ from career_ops.adapter import (
     PendingQuestion,
     WaitingForInput,
 )
-from career_ops.catalog import format_examples, format_exit_codes
+from career_ops.catalog import build_epilog
 from career_ops.cv_cache import CvCache, CvCacheRules, CvDecision, CvSelector
 from career_ops.cv_tailoring import CommandCvTailor, CvGenerationError, CvTailor, FakeCvTailor
 from career_ops.eligibility import EligibilityRules
@@ -166,7 +166,8 @@ OUTPUT_SCHEMA = {
     },
 }
 
-_HELP_EPILOG = """\
+_HELP_EPILOG = build_epilog(
+    """\
 Two modes:
   --job <id>          apply to one explicit job (the original one-job slice)
   --candidates <file> ingest a JSON/TSV candidate list, shortlist it, fetch the
@@ -270,14 +271,15 @@ weighted skill score (required skills weigh three times preferred skills). The
 threshold defaults to 0.90 and can be set in config/cv-cache.json,
 CAREER_OPS_CV_MIN_SCORE or --cv-min-score. The upstream openai-tailor runs only
 on a cache miss; a CV containing the company name is rejected.
-
-""" + "Exit codes:\n" + format_exit_codes(EXIT_CODES) + "\nExamples:\n" + format_examples(
-    EXAMPLES
-) + """
+""",
+    EXIT_CODES,
+    EXAMPLES,
+    footer="""\
 The real adapter needs an authenticated CDP browser already running (see the
 README).  It never changes the Hermes files, ~/.local/bin or the upstream
 career-ops checkout.
-"""
+""",
+)
 
 
 def build_parser() -> argparse.ArgumentParser:

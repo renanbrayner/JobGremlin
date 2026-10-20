@@ -170,6 +170,28 @@ def format_examples(examples: Sequence[str]) -> str:
     return "".join(f"  {example}\n" for example in examples)
 
 
+def build_epilog(
+    body: str,
+    exit_codes: Sequence[tuple[int, str]],
+    examples: Sequence[str],
+    *,
+    footer: str = "",
+) -> str:
+    """Build the shared help epilog sections in one place."""
+    parts = [
+        body.rstrip("\n"),
+        "",
+        "Exit codes:",
+        format_exit_codes(exit_codes).rstrip("\n"),
+        "",
+        "Examples:",
+        format_examples(examples).rstrip("\n"),
+    ]
+    if footer:
+        parts.extend(["", footer.rstrip("\n")])
+    return "\n".join(parts) + "\n"
+
+
 def format_exit_codes(exit_codes: Sequence[tuple[int, str]]) -> str:
     """Format exit codes for an argparse epilog, preserving wrapped meanings."""
     lines = []
@@ -220,7 +242,7 @@ def _parameter(action: argparse.Action) -> Parameter:
         dest=action.dest,
         required=bool(action.required) if is_option else action.nargs not in ("?", "*"),
         type=_type_name(action),
-        action=_ACTION_NAMES.get(type(action).__name__, type(action).__name__),
+        action=_ACTION_NAMES.get(type(action).__name__, "store"),
         default=_default(action),
         choices=tuple(str(choice) for choice in action.choices) if action.choices else None,
         metavar=str(action.metavar) if action.metavar is not None else None,
@@ -263,6 +285,7 @@ __all__ = [
     "CommandInfo",
     "Parameter",
     "build_catalog",
+    "build_epilog",
     "format_examples",
     "format_exit_codes",
     "registered_commands",

@@ -20,7 +20,7 @@ from typing import Callable, Mapping, Sequence
 
 from career_ops import cli
 from career_ops.adapter import PendingQuestion
-from career_ops.catalog import format_examples, format_exit_codes
+from career_ops.catalog import build_epilog
 from career_ops.fake_adapter import FAKE_SCENARIOS, FakeApplicationAdapter, FakeScenario
 from career_ops.parked import ANSWERS_FILENAME, ParkedForm, ParkedFormStore
 from career_ops.paths import WorkspacePaths, expand_path, load_environment, resolve_paths
@@ -104,7 +104,8 @@ OUTPUT_SCHEMA = {
     },
 }
 
-_HELP_EPILOG = """\
+_HELP_EPILOG = build_epilog(
+    """\
 Resume the LinkedIn form that is parked after `career-ops-run` exited 6.
 
 The run JSON contains the pending questions, their options and the resume token:
@@ -129,9 +130,9 @@ A lost tab is reported as `parked_form_lost` and is never counted as sent.
 Output (stdout is always one JSON object) includes:
   command, status, run_id, job, result, failure, artifacts, cv, waiting_input
   and answers: {"path": "...", "written": ["question", ...]}.
-
-""" + "Exit codes:\n" + format_exit_codes(EXIT_CODES) + "\nExamples:\n" + format_examples(
-    EXAMPLES
+""",
+    EXIT_CODES,
+    EXAMPLES,
 )
 
 

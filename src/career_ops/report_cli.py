@@ -14,7 +14,7 @@ import argparse
 import json
 from typing import Mapping, Sequence
 
-from career_ops.catalog import format_examples, format_exit_codes
+from career_ops.catalog import build_epilog
 from career_ops.paths import load_environment, resolve_paths
 from career_ops.report import (
     DEFAULT_RETENTION_RUNS,
@@ -56,15 +56,13 @@ OUTPUT_SCHEMA = {
             "command",
             "status",
             "run_id",
-            "summary",
-            "jobs",
             "artifacts",
-            "retention",
         ],
         "properties": {
             "command": {"const": COMMAND},
             "status": {"type": "string"},
-            "run_id": {"type": "string"},
+            "run_id": {"type": ["string", "null"]},
+            "failure": {"type": "object"},
             "summary": {"type": "object"},
             "jobs": {"type": "array"},
             "artifacts": {"type": "object"},
@@ -74,7 +72,8 @@ OUTPUT_SCHEMA = {
     },
 }
 
-_HELP_EPILOG = """\
+_HELP_EPILOG = build_epilog(
+    """\
 Output (stdout):
   Human mode prints the short text summary. With --json it prints one JSON
   object with the funnel, per-job rows, artifact paths and the pruned runs.
@@ -90,9 +89,9 @@ Retention keeps the last three finished runs by default
 requested run outside the window is reported first and then removed. No file
 from Hermes, the cron, ~/.local/bin or the upstream career-ops checkout is read
 or written.
-
-""" + "Exit codes:\n" + format_exit_codes(EXIT_CODES) + "\nExamples:\n" + format_examples(
-    EXAMPLES
+""",
+    EXIT_CODES,
+    EXAMPLES,
 )
 
 

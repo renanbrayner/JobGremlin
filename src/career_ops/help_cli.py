@@ -9,9 +9,16 @@ from __future__ import annotations
 
 import argparse
 import json
+import textwrap
 from typing import Sequence
 
-from career_ops.catalog import build_catalog, format_examples, format_exit_codes, render_text
+from career_ops.catalog import (
+    CATALOG_SCHEMA_VERSION,
+    ISOLATION,
+    build_catalog,
+    build_epilog,
+    render_text,
+)
 
 COMMAND = "career-ops-help"
 EXIT_OK = 0
@@ -37,7 +44,7 @@ OUTPUT_SCHEMA = {
         "required": ["command", "schema_version", "isolation", "commands"],
         "properties": {
             "command": {"const": COMMAND},
-            "schema_version": {"type": "integer"},
+            "schema_version": {"const": CATALOG_SCHEMA_VERSION},
             "isolation": {"type": "object"},
             "commands": {"type": "array"},
         },
@@ -45,7 +52,7 @@ OUTPUT_SCHEMA = {
     },
 }
 
-_HELP_EPILOG = (
+_HELP_EPILOG = build_epilog(
     """\
 Print the command overview, or one JSON catalog with each command's name,
 description, arguments, options, examples, exit codes and output schema.
@@ -54,14 +61,10 @@ The catalog is generated from the command registry, so it always covers the
 commands this repo ships. Every command also accepts `--help` for its own
 usage and examples.
 
-JobGremlin runs in parallel and in isolation. It never changes Hermes, the cron
-job, the allowlist, ~/.local/bin or the current career-ops checkout.
-
 """
-    + "Exit codes:\n"
-    + format_exit_codes(EXIT_CODES)
-    + "\nExamples:\n"
-    + format_examples(EXAMPLES)
+    + textwrap.fill(str(ISOLATION["summary"]), width=88),
+    EXIT_CODES,
+    EXAMPLES,
 )
 
 

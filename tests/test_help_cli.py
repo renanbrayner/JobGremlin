@@ -6,13 +6,49 @@ import re
 from typing import Mapping
 
 from career_ops.catalog import registered_commands
-from conftest import REPO_ROOT
+from conftest import (
+    FRONTEND_JD,
+    REPO_ROOT,
+    invoke,
+    write_candidates,
+    write_cv,
+    write_jd_fixtures,
+)
 
 SCHEMA_PATH = REPO_ROOT / "docs" / "schema" / "help-catalog.schema.json"
+
+# The validator below implements exactly these keywords. Anything else fails the
+# test instead of being silently ignored, so the checked-in schema cannot start
+# relying on validation that this suite does not perform.
+SUPPORTED_KEYWORDS = {
+    "$defs",
+    "$id",
+    "$ref",
+    "$schema",
+    "additionalProperties",
+    "const",
+    "description",
+    "enum",
+    "items",
+    "minItems",
+    "minLength",
+    "minProperties",
+    "pattern",
+    "properties",
+    "required",
+    "title",
+    "type",
+}
+
+
+def _check_keywords(schema: Mapping[str, object], path: str) -> None:
+    unknown = set(schema) - SUPPORTED_KEYWORDS
+    assert not unknown, f"{path}: unsupported schema keywords {sorted(unknown)}"
 
 
 def _validate(instance: object, schema: Mapping[str, object], root: Mapping[str, object], path: str = "$") -> None:
     """Validate the JSON-Schema subset used by the help catalog schema."""
+    _check_keywords(schema, path)
     if "$ref" in schema:
         reference = str(schema["$ref"])
         assert reference.startswith("#/$defs/"), reference
@@ -20,6 +56,7 @@ def _validate(instance: object, schema: Mapping[str, object], root: Mapping[str,
         assert isinstance(definitions, Mapping)
         schema = definitions[reference.removeprefix("#/$defs/")]
         assert isinstance(schema, Mapping)
+        _check_keywords(schema, path)
 
     if "const" in schema:
         assert instance == schema["const"], f"{path}: expected {schema['const']!r}"
@@ -51,12 +88,17 @@ def _validate(instance: object, schema: Mapping[str, object], root: Mapping[str,
         assert isinstance(required, list)
         for name in required:
             assert name in instance, f"{path}: missing required property {name!r}"
+        min_properties = schema.get("minProperties")
+        if isinstance(min_properties, int):
+            assert len(instance) >= min_properties, f"{path}: too few properties"
         additional = schema.get("additionalProperties", True)
         for name, value in instance.items():
             if name in properties:
                 child = properties[name]
                 assert isinstance(child, Mapping)
                 _validate(value, child, root, f"{path}.{name}")
+            elif isinstance(additional, Mapping):
+                _validate(value, additional, root, f"{path}.{name}")
             else:
                 assert additional is not False, f"{path}: unexpected property {name!r}"
 
@@ -183,3 +225,63 @@ def test_catalog_examples_are_the_ones_shown_by_each_command_help(run):
         assert help_result.returncode == 0
         for example in command["examples"]:
             assert example in help_result.stdout
+
+
+def test_published_output_schemas_accept_real_cli_output(run, workspace):
+    catalog = _catalog(run)
+    commands = {command["name"]: command for command in catalog["commands"]}
+
+    def check(name: str, payload: object) -> None:
+        schema = commands[name]["output"]["schema"]
+        _validate(payload, schema, schema)
+
+    check("career-ops-help", catalog)
+
+    cv = write_cv(workspace)
+    candidates = write_candidates(workspace, 1)
+    jds = write_jd_fixtures(workspace, {"1": FRONTEND_JD})
+    run_result, run_payload = invoke(
+        run,
+        "--candidates",
+        str(candidates),
+        "--jd-dir",
+        str(jds),
+        "--cv",
+        str(cv),
+        "--adapter",
+        "fake",
+        "--target",
+        "1",
+        "--run-id",
+        "help-contract-run",
+    )
+    assert run_result.returncode == 0
+    check("career-ops-run", run_payload)
+
+    reply_result = run(
+        "career-ops-reply",
+        "--run-id",
+        "no-such-run",
+        "--job",
+        "4411222",
+        "--token",
+        "no-such-token",
+        "--answer",
+        "question=answer",
+    )
+    assert reply_result.returncode == 3
+    check("career-ops-reply", json.loads(reply_result.stdout))
+
+    report_error = run("career-ops-report", "--run-id", "no-such-run", "--json")
+    assert report_error.returncode == 1
+    check("career-ops-report", json.loads(report_error.stdout))
+
+    report_ok = run(
+        "career-ops-report",
+        "--run-id",
+        "help-contract-run",
+        "--json",
+        "--no-prune",
+    )
+    assert report_ok.returncode == 0
+    check("career-ops-report", json.loads(report_ok.stdout))
