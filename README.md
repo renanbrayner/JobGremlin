@@ -67,6 +67,8 @@ Os caminhos podem ser definidos por variáveis de ambiente ou por um arquivo
 | `CAREER_OPS_RUN_MAX_SECONDS` | `14400` | orçamento de tempo do loop diário (`0` desliga) |
 | `CAREER_OPS_MAX_ATTEMPTS_PER_JOB` | `2` | tentativas por vaga em uma rodada |
 | `CAREER_OPS_QUEUE_LOW_WATERMARK` | `5` | backlog que dispara uma nova descoberta |
+| `CAREER_OPS_RETENTION_RUNS` | `3` | sessões completas mantidas após cada rodada |
+| `CAREER_OPS_VIDEO` | desligado | liga o MP4 opcional por sessão (`1`, `true`, `yes`) |
 | `CAREER_OPS_ENV_FILE` | `$CAREER_OPS_CONFIG/career-ops.env` | arquivo de override |
 
 Configurações pessoais (por exemplo `config/profile.yml`,
@@ -113,6 +115,9 @@ Os testes cobrem:
 - cache de CV: hit exato, alta similaridade, idioma, família, senioridade,
   must-have faltando, score abaixo do threshold, geração no miss, origem
   adicional no hit e tailoring chamado só no miss;
+- relatório diário: funil, descartes por motivo, decisões de CV, status e
+  duração por vaga, thumbnails no HTML, resumo texto/JSON e retenção das três
+  últimas sessões completas;
 - o adaptador real embrulha `jobinfo`/`easyapply`/`cdp` sem alterar os scripts;
 - garantia de que os comandos não alteram o upstream falso.
 
@@ -525,7 +530,9 @@ Regras de parada, todas reportadas em `stop_reason`:
 - `daily_limit_reached` — o adaptador reportou o limite diário do LinkedIn
   (`LinkedInDailyLimit`);
 - `queue_exhausted` — a fonte de candidatos não tem mais nada e a fila acabou;
-- `run_locked` — outra rodada já segura `data/run.lock`.
+- `run_locked` — outra rodada já segura `data/run.lock`;
+- `unexpected_error` — a rodada parou com uma exceção inesperada; o estado é
+  finalizado como falho e o relatório ainda é gerado.
 
 Cada vaga tem no máximo `--max-attempts` tentativas por rodada
 (`CAREER_OPS_MAX_ATTEMPTS_PER_JOB`, padrão 2). Uma falha transitória
@@ -550,6 +557,46 @@ Cada tentativa grava uma sessão própria em
 `output/sessions/<run_id>/<job-id>/` (a segunda tentativa da mesma vaga vira
 `<job-id>-2/`), com `run_id` igual em todos os eventos da rodada.
 
+## Relatório, retenção e vídeo
+
+Toda rodada diária termina gerando, dentro de `output/sessions/<run_id>/`:
+
+```
+report.md       # funil e uma linha por vaga, com links para as evidências
+report.html     # o mesmo relatório com thumbnails das screenshots
+summary.txt     # resumo curto para leitura humana
+summary.json    # resumo máquina para o Hermes (funil, bloqueios e caminhos)
+```
+
+O funil conta candidatos, descartes por motivo, elegíveis, CVs gerados e
+reutilizados, aplicadas, verificadas, falhas e vagas aguardando resposta. Cada
+vaga traz estado, duração, CV usado (e se veio do cache), motivo de falha e as
+screenshots da sessão (incluindo as tentativas com sufixo `-2`). O `report.html`
+usa as mesmas imagens como thumbnails.
+
+`career-ops-run` anexa ao JSON de saída um objeto `report` com os caminhos dos
+quatro artefatos e um objeto `summary` com o funil e os bloqueios. Nada é
+enviado automaticamente: o Hermes apenas lê `summary.json` quando for chamado.
+
+O relatório de uma rodada pode ser regenerado sem reaplicar nada:
+
+```bash
+scripts/career-ops-report --run-id daily-2026-10-20
+scripts/career-ops-report --run-id daily-2026-10-20 --json
+```
+
+A retenção padrão mantém as **três últimas sessões completas** e remove as mais
+antigas (diretório em `output/sessions/` e estado em `data/runs/`). Rodadas
+incompletas/em andamento nunca são removidas. Se a rodada pedida estiver fora
+da janela, `career-ops-report` grava o relatório antes da limpeza e ela também é
+removida. O limite vem de `CAREER_OPS_RETENTION_RUNS` ou de `--keep`;
+`--no-prune` desliga a limpeza.
+
+Vídeo é opcional e desligado por padrão. Com `--video` (ou
+`CAREER_OPS_VIDEO=1`) a rodada grava um único
+`output/sessions/<run_id>/video.mp4`; se a ferramenta de captura não estiver
+disponível, a rodada continua normalmente e o relatório apenas omite o vídeo.
+
 ## Navegador em paralelo
 
 Por padrão os scripts usam o mesmo perfil e a mesma porta CDP do sistema atual
@@ -565,8 +612,9 @@ CDP_PORT=9334 scripts/career-ops-browser
 
 - `career-ops-run` já aplica uma vaga explícita ou executa o loop diário sobre
   uma lista persistente, com cache/geração de CV, lock, retomada e meta
-  verificada. `career-ops-reply`, `career-ops-status`, `career-ops-report` e
-  `career-ops-help --json` ainda são construídos nos próximos tickets.
+  verificada. `career-ops-report` regenera o relatório e aplica retenção.
+  `career-ops-reply`, `career-ops-status` e `career-ops-help --json` ainda são
+  construídos nos próximos tickets.
 - O build de CV delega aos helpers do upstream (`openai-tailor.mjs` e
   `generate-pdf.mjs`), copiando `cv.md`/`config/profile.yml` para um staging root
   do workspace. O tailor real é validado por testes com runner injetado e pelo

@@ -1,29 +1,16 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
 from career_ops.capture import CaptureTimeout
 from career_ops.session import SessionRecorder
-from conftest import FakeScreenshotter, read_events
+from conftest import FakeClock, FakeScreenshotter, read_events
 
 UTC = timezone.utc
-
-
-class FakeClock:
-    """Deterministic, manually advanced clock."""
-
-    def __init__(self, start: datetime) -> None:
-        self.current = start
-
-    def __call__(self) -> datetime:
-        return self.current
-
-    def advance(self, milliseconds: int) -> None:
-        self.current += timedelta(milliseconds=milliseconds)
 
 
 def test_an_application_run_creates_a_session_directory_with_metadata(paths, workspace):

@@ -120,6 +120,7 @@ class RunState:
         submitted: bool = False,
         cv: str | None = None,
         session_dir: str | None = None,
+        duration_ms: int = 0,
     ) -> None:
         self.jobs[job_id] = {
             "state": state,
@@ -130,6 +131,7 @@ class RunState:
             "waiting": waiting,
             "cv": cv,
             "session_dir": session_dir,
+            "duration_ms": int(duration_ms),
             "finished_at": self._clock().isoformat(),
         }
         self.updated_at = self._clock().isoformat()

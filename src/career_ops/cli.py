@@ -47,10 +47,23 @@ from career_ops.real_adapter import (
     RealApplicationAdapter,
 )
 from career_ops.renderer import RendererWatchdog, resolve_renderer_timeout
+from career_ops.report import (
+    ReportError,
+    build_run_report,
+    prune_runs,
+    retention_limit,
+)
 from career_ops.run_lock import LOCK_FILENAME, RunLock, RunLocked
 from career_ops.run_state import RunState, utcnow, validate_run_id
-from career_ops.session import SessionRecorder
+from career_ops.session import SESSION_DIRNAME, SessionRecorder
 from career_ops.submission import SubmissionGuard, SubmissionResult
+from career_ops.video import (
+    VIDEO_FILENAME,
+    FakeVideoRecorder,
+    NullVideoRecorder,
+    VideoRecorder,
+    WfRecorderVideo,
+)
 
 COMMAND = "career-ops-run"
 EXIT_VERIFIED = 0
@@ -89,6 +102,8 @@ Daily loop (with --candidates):
                       (default: 5)
   --requeue-reason    with --candidates, explicitly allow blocked ids to return
                       to `new` (recorded in the queue history)
+  --video             record one MP4 per daily run (default: off or
+                      $CAREER_OPS_VIDEO)
 
 The loop is sequential: one application at a time. It counts only applications
 confirmed by LinkedIn, stops before opening a 21st job, resumes with the same
@@ -96,6 +111,10 @@ confirmed by LinkedIn, stops before opening a 21st job, resumes with the same
 rounds cannot run at once. Progress is persisted in
 data/runs/<run_id>.json; each attempt is a session below
 output/sessions/<run_id>/<job-id>/.
+
+Each daily run also writes report.md, report.html, summary.txt and summary.json
+below output/sessions/<run_id>/ and keeps the last three finished runs
+(CAREER_OPS_RETENTION_RUNS). `career-ops-report --run-id <id>` regenerates them.
 
 Output (stdout is always one JSON object):
   {
@@ -118,6 +137,14 @@ Output (stdout is always one JSON object):
     "run": {"status": "...", "stop_reason": "...", "attempts": 2,
             "verified": 20, "waiting": 0, "state_path": "...",
             "applications": [{"id": "...", "state": "verified", ...}]},
+    "report": {"session_dir": "...", "markdown": ".../report.md",
+              "html": ".../report.html", "summary_text": ".../summary.txt",
+              "summary_json": ".../summary.json", "video": null},
+    "report_error": null | {"reason": "...", "message": "..."},
+    "retention": {"keep": 3, "removed": ["..."], "error": "..."},  # error only on failure
+    "summary": {"run_id": "...", "status": "verified",
+                "funnel": {"candidates": 25, "discarded": 5, ...},
+                "blockers": {"title_qa": 2, ...}},
     "cv_cache": {                      # queue mode without --cv
       "hit": true, "reason": "cache_hit" | "cache_miss",
       "miss_reason": null | "language_mismatch" | "family_incompatible"
@@ -136,7 +163,7 @@ Output (stdout is always one JSON object):
   }
 
 Stop reasons: target_reached, queue_exhausted, time_budget_exhausted,
-daily_limit_reached, run_locked.
+daily_limit_reached, run_locked, unexpected_error.
 
 The CV cache is gated by language, family, seniority, must-have skills and a
 weighted skill score (required skills weigh three times preferred skills). The
@@ -267,6 +294,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="session directory name under output/sessions/ (default: UTC timestamp)",
     )
     parser.add_argument(
+        "--video",
+        action="store_true",
+        help=(
+            "record one MP4 per daily run in output/sessions/<run_id>/video.mp4 "
+            "(default: off or $CAREER_OPS_VIDEO)"
+        ),
+    )
+    parser.add_argument(
         "--adapter",
         choices=("real", "fake"),
         default="real",
@@ -300,6 +335,8 @@ def main(
         parser.error("--jd-dir requires --candidates")
     if args.requeue_reason and not args.candidates:
         parser.error("--requeue-reason requires --candidates")
+    if args.video and not args.candidates:
+        parser.error("--video requires --candidates")
     if args.target < 1:
         parser.error("--target must be at least 1")
     if args.target != DEFAULT_TARGET and not args.candidates:
@@ -598,24 +635,83 @@ def _run_queue(
             payload["cv_cache"] = decision.as_dict()
         return payload
 
+    video = (
+        _build_video(args.adapter)
+        if _video_enabled(args.video, environment)
+        else NullVideoRecorder()
+    )
+    video_path = paths.output / SESSION_DIRNAME / run_id / VIDEO_FILENAME
+
     try:
         with RunLock(
             paths.data / LOCK_FILENAME,
             assert_writable=paths.assert_writable,
             clock=clock,
         ):
-            loop = DailyLoop(
-                queue=queue,
-                processor=QueueProcessor(queue, fetcher, rules=rules),
-                source=FileCandidateSource(candidates_path),
-                config=config,
-                state=state,
-                apply=apply,
-                resolve_cv=resolve_cv,
-                requeue_reason=args.requeue_reason,
-                monotonic=monotonic,
-            )
-            outcome = loop.run()
+            video_started = _start_video(paths, video, video_path)
+            outcome: LoopOutcome | None = None
+            crash: Exception | None = None
+            try:
+                loop = DailyLoop(
+                    queue=queue,
+                    processor=QueueProcessor(queue, fetcher, rules=rules),
+                    source=FileCandidateSource(candidates_path),
+                    config=config,
+                    state=state,
+                    apply=apply,
+                    resolve_cv=resolve_cv,
+                    requeue_reason=args.requeue_reason,
+                    monotonic=monotonic,
+                )
+                outcome = loop.run()
+            except Exception as exc:  # noqa: BLE001 - still leave a report behind
+                crash = exc
+            finally:
+                if video_started:
+                    _stop_video(video)
+            if crash is not None:
+                _finish_crashed_state(state)
+                payload = _error_payload(
+                    job_id=None,
+                    reason="unexpected_error",
+                    message=f"{type(crash).__name__}: {crash}",
+                    cv=cv,
+                )
+                payload["run_id"] = run_id
+                payload["target"] = args.target
+                payload["stop_reason"] = "unexpected_error"
+                payload["attempts"] = state.attempts
+                payload["submitted"] = state.clicked_count()
+                payload["verified"] = state.verified
+                payload["waiting"] = state.waiting_count()
+                payload["applications"] = []
+                payload["run"] = {
+                    "run_id": run_id,
+                    "target": args.target,
+                    "status": "failed",
+                    "stop_reason": "unexpected_error",
+                    "submitted": state.clicked_count(),
+                    "verified": state.verified,
+                    "waiting": state.waiting_count(),
+                    "attempts": state.attempts,
+                    "state_path": str(state.path),
+                    "applications": [],
+                }
+                payload["queue"] = {
+                    "path": str(queue.path),
+                    "selection": None,
+                    "ingested": [],
+                    "record": None,
+                    "records": [record.as_dict() for record in queue.records.values()],
+                }
+                _attach_report(
+                    payload,
+                    paths=paths,
+                    run_id=run_id,
+                    environment=environment,
+                )
+                return _emit(payload, EXIT_FAILED)
+            assert outcome is not None
     except RunLocked as exc:
         payload = _error_payload(job_id=None, reason="run_locked", message=str(exc), cv=cv)
         payload["target"] = args.target
@@ -637,7 +733,88 @@ def _run_queue(
         queue=queue,
         cv=cv,
     )
+    _attach_report(
+        payload,
+        paths=paths,
+        run_id=run_id,
+        environment=environment,
+    )
     return _emit(payload, _loop_exit_code(outcome))
+
+
+def _finish_crashed_state(state: RunState) -> None:
+    """Best effort: mark a crashed run finished so retention and reports see it."""
+    try:
+        state.finish(status="failed", stop_reason="unexpected_error")
+        state.save()
+    except Exception:  # noqa: BLE001 - the report is the remaining evidence
+        pass
+
+
+def _attach_report(
+    payload: dict[str, object],
+    *,
+    paths: WorkspacePaths,
+    run_id: str,
+    environment: Mapping[str, str],
+) -> None:
+    """Attach the generated report and apply retention without hiding the run outcome."""
+    try:
+        report = build_run_report(paths, run_id)
+    except ReportError as exc:
+        payload["report"] = None
+        payload["report_error"] = {"reason": exc.reason, "message": exc.message}
+        return
+    except Exception as exc:  # noqa: BLE001 - the application outcome is already known
+        payload["report"] = None
+        payload["report_error"] = {"reason": "report_failed", "message": str(exc)}
+        return
+
+    payload["report"] = report.artifacts.as_dict()
+    payload["report_error"] = None
+    payload["summary"] = dict(report.summary)
+    try:
+        keep = retention_limit(None, environment)
+        removed = prune_runs(paths, keep=keep, protected={run_id})
+        payload["retention"] = {"keep": keep, "removed": list(removed)}
+    except Exception as exc:  # noqa: BLE001 - retention must not hide the run outcome
+        payload["retention"] = {"keep": None, "removed": [], "error": str(exc)}
+
+
+def _video_enabled(flag: bool, environment: Mapping[str, str]) -> bool:
+    if flag:
+        return True
+    raw = environment.get("CAREER_OPS_VIDEO", "")
+    return raw.strip().lower() in {"1", "true", "yes", "y", "sim", "on"}
+
+
+def _build_video(adapter_name: str) -> VideoRecorder:
+    if adapter_name == "fake":
+        return FakeVideoRecorder()
+    return WfRecorderVideo()
+
+
+def _start_video(
+    paths: WorkspacePaths,
+    recorder: VideoRecorder,
+    path: Path,
+) -> bool:
+    if isinstance(recorder, NullVideoRecorder):
+        return False
+    try:
+        paths.assert_writable(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        recorder.start(path)
+    except Exception:  # noqa: BLE001 - video is optional evidence
+        return False
+    return True
+
+
+def _stop_video(recorder: VideoRecorder) -> None:
+    try:
+        recorder.stop()
+    except Exception:  # noqa: BLE001 - video is optional evidence
+        pass
 
 
 def _loop_payload(

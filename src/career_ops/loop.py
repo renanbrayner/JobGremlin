@@ -328,9 +328,11 @@ class DailyLoop:
     def _resolve_cv_or_record(
         self, selection: Selection
     ) -> tuple[Path | None, CvDecision | None]:
+        started = self._monotonic()
         try:
             return self.resolve_cv(selection)
         except CvGenerationError as exc:
+            duration_ms = int((self._monotonic() - started) * 1000)
             self.queue.complete(
                 selection.job_id,
                 "failed",
@@ -347,6 +349,7 @@ class DailyLoop:
                 reason=exc.reason,
                 attempts=self.queue.get(selection.job_id).attempts,
                 message=str(exc),
+                duration_ms=duration_ms,
             )
             self._last_selection = selection
             self._last_payload = self._synthetic_failure(selection, exc.reason, str(exc))
@@ -361,7 +364,7 @@ class DailyLoop:
                     waiting=False,
                     cv=None,
                     session_dir=None,
-                    duration_ms=0,
+                    duration_ms=duration_ms,
                     payload=self._last_payload,
                 )
             )
@@ -417,6 +420,7 @@ class DailyLoop:
             cv=str(cv),
             session_dir=session_dir,
             cv_decision=cv_decision,
+            duration_ms=duration_ms,
         )
         return (
             JobOutcome(
@@ -449,6 +453,7 @@ class DailyLoop:
         session_dir: str | None = None,
         cv_decision: CvDecision | None = None,
         message: str | None = None,
+        duration_ms: int = 0,
     ) -> None:
         self.state.record_job(
             job_id,
@@ -460,6 +465,7 @@ class DailyLoop:
             waiting=waiting,
             cv=cv,
             session_dir=session_dir,
+            duration_ms=duration_ms,
         )
         if cv_decision is not None:
             self.state.jobs[job_id]["cv_cache"] = cv_decision.as_dict()

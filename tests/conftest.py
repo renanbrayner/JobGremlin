@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -28,6 +29,19 @@ Software Engineer
 Requirements:
 - Kubernetes and Terraform.
 """
+
+
+class FakeClock:
+    """Deterministic, manually advanced clock."""
+
+    def __init__(self, start: datetime) -> None:
+        self.current = start
+
+    def __call__(self) -> datetime:
+        return self.current
+
+    def advance(self, milliseconds: int) -> None:
+        self.current += timedelta(milliseconds=milliseconds)
 
 
 class FakeScreenshotter:

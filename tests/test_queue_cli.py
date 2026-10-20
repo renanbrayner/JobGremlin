@@ -142,7 +142,14 @@ def test_a_second_run_does_not_reapply_a_verified_job(run, workspace):
     assert second_payload["status"] == "failed"
     assert second_payload["failure"]["reason"] == "no_eligible_job"
     assert second_payload["queue"]["ingested"][0]["reason"] == "blocked:verified"
-    assert len(list((workspace / "output" / "sessions").iterdir())) == 1
+    sessions = workspace / "output" / "sessions"
+    assert sorted(path.name for path in sessions.iterdir()) == [
+        "queue-first",
+        "queue-second",
+    ]
+    assert (sessions / "queue-first" / "3").is_dir()
+    assert not (sessions / "queue-second" / "3").exists()
+    assert (sessions / "queue-second" / "report.md").is_file()
 
 
 def test_a_missing_jd_is_recorded_and_the_flow_continues(run, workspace):

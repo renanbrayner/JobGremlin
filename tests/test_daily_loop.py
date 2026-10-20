@@ -368,6 +368,47 @@ def test_the_time_budget_stops_before_opening_the_next_job(
     assert _records(workspace)["2"]["state"] == "new"
 
 
+def test_an_unexpected_loop_crash_still_writes_a_report(
+    workspace, env, capsys, monkeypatch
+):
+    candidates = _candidates(workspace, count=1)
+    jds = _jds(workspace, count=1)
+    cv = write_cv(workspace)
+
+    def crash(self, *args, **kwargs):
+        raise RuntimeError("kaboom")
+
+    monkeypatch.setattr(DailyLoop, "run", crash)
+
+    exit_code = main(
+        [
+            "--candidates",
+            str(candidates),
+            "--jd-dir",
+            str(jds),
+            "--cv",
+            str(cv),
+            "--adapter",
+            "fake",
+            "--target",
+            "1",
+            "--run-id",
+            "daily-crash",
+        ],
+        environ=env,
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 1
+    assert payload["status"] == "failed"
+    assert payload["stop_reason"] == "unexpected_error"
+    assert payload["failure"]["reason"] == "unexpected_error"
+    assert payload["report_error"] is None
+    assert Path(payload["report"]["markdown"]).is_file()
+    assert payload["summary"]["status"] == "failed"
+    assert _run_state(workspace, "daily-crash")["stop_reason"] == "unexpected_error"
+
+
 class _CountingSource:
     def __init__(self, candidates: Sequence[Candidate]) -> None:
         self.candidates = list(candidates)
