@@ -36,6 +36,8 @@ def test_title_filter_rejects_inadequate_titles_with_a_reason(title, reason):
         "Pessoa Desenvolvedora Front-end",
         "Engenheiro de Software Backend",
         "React Native Developer",
+        "UI Developer",
+        "Front-end UI Engineer",
     ],
 )
 def test_title_filter_accepts_development_titles(title):
@@ -52,13 +54,13 @@ def test_title_filter_accepts_development_titles(title):
         ("Anywhere", "", True, True, None),
         ("Recife, PE", "On-site", False, True, None),
         ("Olinda, PE", "Presencial", False, True, None),
-        ("Recife, PE", "Hybrid", False, False, "location_hybrid"),
+        ("Recife, PE", "Hybrid", False, True, None),
         ("São Paulo, SP", "Hybrid", False, False, "location_hybrid"),
         ("São Paulo, SP", "On-site", False, False, "location_outside_region"),
         ("", "On-site", False, False, "location_missing"),
     ],
 )
-def test_location_filter_accepts_remote_or_recife_onsite(
+def test_location_filter_accepts_remote_or_recife_roles(
     location, workplace, is_remote, accepted, reason
 ):
     decision = filter_location(location, workplace=workplace, is_remote=is_remote)

@@ -19,6 +19,7 @@ from career_ops.eligibility import EligibilityRules, evaluate_eligibility
 from career_ops.job_description import JobDescriptionError, JobDescriptionFetcher
 from career_ops.job_filters import filter_location, filter_title
 from career_ops.job_profile import build_job_profile
+from career_ops.paths import WorkspacePaths
 
 QUEUE_FILENAME = "queue.json"
 JD_DIRNAME = "jds"
@@ -29,15 +30,16 @@ _BLOCKING_STATES = frozenset(
     {
         "title_rejected",
         "ineligible",
+        "failed",
         "applying",
         "waiting_input",
         "submitted",
         "verified",
-        "closed",
-        "applied",
-        "discarded",
     }
 )
+
+# States that can still be retried safely without an explicit requeue.
+_RESUMABLE_STATES = frozenset({"new", "jd_fetched"})
 
 _EVENT_BY_STATE = {
     "title_rejected": "rejected",
@@ -210,6 +212,15 @@ class Selection:
             "decision": dict(self.decision) if self.decision is not None else None,
         }
 
+    def as_job(self) -> dict[str, object]:
+        """Flatten the selection into the job payload used by sessions/JSON."""
+        job = self.candidate.as_dict()
+        job["profile"] = dict(self.profile) if self.profile is not None else None
+        job["decision"] = dict(self.decision) if self.decision is not None else None
+        if self.jd_path is not None:
+            job["jd_path"] = str(self.jd_path)
+        return job
+
 
 class JobQueue:
     """One JSON file under ``data/`` with a record per candidate id."""
@@ -225,23 +236,22 @@ class JobQueue:
         self.path = Path(path)
         self.jds_dir = Path(jds_dir)
         self.records: dict[str, StoredJob] = {}
-        self.events: list[dict[str, object]] = []
+        self.history: list[dict[str, object]] = []
         self._clock = clock or _utcnow
         self._assert_writable = assert_writable
 
     @classmethod
     def load(
         cls,
-        paths: object,
+        paths: WorkspacePaths,
         *,
         clock: Callable[[], datetime] | None = None,
     ) -> "JobQueue":
-        data = getattr(paths, "data")
         queue = cls(
-            Path(data) / QUEUE_FILENAME,
-            jds_dir=Path(data) / JD_DIRNAME,
+            paths.data / QUEUE_FILENAME,
+            jds_dir=paths.data / JD_DIRNAME,
             clock=clock,
-            assert_writable=getattr(paths, "assert_writable", None),
+            assert_writable=paths.assert_writable,
         )
         if not queue.path.is_file():
             return queue
@@ -259,9 +269,11 @@ class JobQueue:
                 raise ValueError(f"queue {queue.path} has an invalid record")
             record = StoredJob.from_dict(item)
             queue.records[record.id] = record
-        events = payload.get("events")
-        if isinstance(events, list):
-            queue.events = [dict(event) for event in events if isinstance(event, Mapping)]
+        history = payload.get("history")
+        if isinstance(history, list):
+            queue.history = [
+                dict(entry) for entry in history if isinstance(entry, Mapping)
+            ]
         return queue
 
     def ingest(
@@ -286,7 +298,7 @@ class JobQueue:
                     }
                     existing.attempts = 0
                     existing.updated_at = now
-                    self._event(
+                    self._history(
                         existing.id,
                         "requeued",
                         state="new",
@@ -297,14 +309,37 @@ class JobQueue:
                         EnqueueResult(candidate.id, "requeued", requeue_reason, "new")
                     )
                     continue
+                refused_state, refused_reason = _initial_state(candidate)
+                if refused_state != "new" and existing.state not in _BLOCKING_STATES:
+                    previous = existing.state
+                    existing.state = refused_state
+                    existing.reason = refused_reason
+                    existing.detail = {}
+                    existing.updated_at = now
+                    self._history(
+                        existing.id,
+                        "rejected",
+                        state=refused_state,
+                        reason=refused_reason,
+                        detail={"from": previous},
+                    )
+                    results.append(
+                        EnqueueResult(
+                            candidate.id,
+                            "skipped",
+                            refused_reason,
+                            refused_state,
+                        )
+                    )
+                    continue
                 if existing.state in _BLOCKING_STATES:
                     reason = f"blocked:{existing.state}"
-                    self._event(existing.id, "skipped", state=existing.state, reason=reason)
+                    self._history(existing.id, "skipped", state=existing.state, reason=reason)
                     results.append(
                         EnqueueResult(candidate.id, "skipped", reason, existing.state)
                     )
                     continue
-                self._event(existing.id, "skipped", state=existing.state, reason="duplicate")
+                self._history(existing.id, "skipped", state=existing.state, reason="duplicate")
                 results.append(
                     EnqueueResult(candidate.id, "skipped", "duplicate", existing.state)
                 )
@@ -319,14 +354,18 @@ class JobQueue:
                 updated_at=now,
             )
             self.records[candidate.id] = record
-            self._event(candidate.id, "enqueued", state=initial_state, reason=initial_reason)
+            self._history(candidate.id, "enqueued", state=initial_state, reason=initial_reason)
             status = "enqueued" if initial_state == "new" else "skipped"
             results.append(EnqueueResult(candidate.id, status, initial_reason, initial_state))
         self.save()
         return results
 
     def pending(self) -> list[StoredJob]:
-        return [record for record in self.records.values() if record.state == "new"]
+        return [
+            record
+            for record in self.records.values()
+            if record.state in _RESUMABLE_STATES
+        ]
 
     def first_eligible(self) -> StoredJob | None:
         return next(
@@ -360,7 +399,7 @@ class JobQueue:
             record.profile = dict(profile)
         if decision is not None:
             record.decision = dict(decision)
-        self._event(
+        self._history(
             job_id,
             _EVENT_BY_STATE.get(state, "state_changed"),
             state=state,
@@ -389,6 +428,7 @@ class JobQueue:
         reason: str | None,
         detail: Mapping[str, object] | None = None,
     ) -> StoredJob:
+        """Record the outcome of an application attempt."""
         return self.mark(job_id, state, reason, detail)
 
     def store_jd(self, job_id: str, text: str) -> Path:
@@ -408,7 +448,7 @@ class JobQueue:
             "version": QUEUE_VERSION,
             "updated_at": _iso(self._clock()),
             "records": [record.as_dict() for record in self.records.values()],
-            "events": list(self.events),
+            "history": list(self.history),
         }
 
     def save(self) -> None:
@@ -425,20 +465,20 @@ class JobQueue:
         if self._assert_writable is not None:
             self._assert_writable(path)
 
-    def _event(
+    def _history(
         self,
         job_id: str,
-        event: str,
+        action: str,
         *,
         state: str,
         reason: str | None,
         detail: Mapping[str, object] | None = None,
     ) -> None:
-        self.events.append(
+        self.history.append(
             {
                 "ts": _iso(self._clock()),
                 "id": job_id,
-                "event": event,
+                "action": action,
                 "state": state,
                 "reason": reason,
                 "detail": dict(detail) if detail is not None else {},
@@ -490,9 +530,8 @@ class QueueProcessor:
             is_remote=candidate.is_remote,
         )
         if not location.accepted:
-            # Location is a cheap pre-JD reject.  The explicit lifecycle has no
-            # location state, so it is recorded as an ineligible decision with
-            # the filter that produced it.
+            # Location is a cheap pre-JD reject. The explicit lifecycle has no
+            # location state, so record it as ineligible with the filter detail.
             self.queue.mark(
                 record.id,
                 "ineligible",
@@ -524,9 +563,6 @@ class QueueProcessor:
         profile = build_job_profile(
             jd.text,
             title=candidate.title or jd.title,
-            company=candidate.company or jd.company,
-            location=candidate.location or jd.location,
-            workplace=candidate.workplace or jd.workplace,
         )
         decision = evaluate_eligibility(profile, self.rules)
         self.queue.mark(

@@ -84,7 +84,7 @@ _TITLE_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
         "title_non_dev",
         re.compile(
-            r"\b(designer|ux|ui|vendas|sales|comercial|marketing|recrutad\w*|recruiter|"
+            r"\b(designer|ux|vendas|sales|comercial|marketing|recrutad\w*|recruiter|"
             r"financeiro|contab\w*|customer success|suporte ao cliente|analista de negocios|"
             r"business analyst|business development|dados|data scien\w*|analytics|bi|power bi|"
             r"machine learning engineer|cientista)\b"
@@ -155,12 +155,12 @@ def filter_location(
     workplace: str = "",
     is_remote: bool = False,
 ) -> FilterDecision:
-    """Accept remote roles or on-site roles in the Recife region.
+    """Accept remote roles or roles in Recife, including hybrid ones there.
 
-    Hybrid roles are rejected wherever they are; an on-site role outside the
-    region is rejected too.  A missing workplace is treated as unspecified: it
-    passes only when the location itself is inside the region, because that is
-    the only place an on-site role could be acceptable.
+    Hybrid and on-site roles outside the Recife region are rejected.  A missing
+    workplace is treated as unspecified: it passes only when the location itself
+    is inside the region, because that is the only place an on-site role could
+    be acceptable.
     """
     location_raw = (location or "").strip()
     workplace_raw = (workplace or "").strip()
@@ -173,14 +173,16 @@ def filter_location(
         "is_remote": bool(is_remote),
     }
 
-    if kind == "hybrid":
-        return FilterDecision(False, "location_hybrid", detail)
     if kind == "remote":
         return FilterDecision(True, None, detail)
     if not location_raw:
         return FilterDecision(False, "location_missing", detail)
-    if _in_recife_region(fold(location_raw)):
+    in_region = _in_recife_region(fold(location_raw))
+    detail["in_region"] = in_region
+    if in_region:
         return FilterDecision(True, None, detail)
+    if kind == "hybrid":
+        return FilterDecision(False, "location_hybrid", detail)
     return FilterDecision(False, "location_outside_region", detail)
 
 

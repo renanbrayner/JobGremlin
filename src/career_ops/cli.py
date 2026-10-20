@@ -27,7 +27,6 @@ from career_ops.queue import (
     EnqueueResult,
     JobQueue,
     QueueProcessor,
-    Selection,
     load_candidates,
 )
 from career_ops.real_adapter import (
@@ -58,6 +57,8 @@ Two modes:
   --candidates <file> ingest a JSON/TSV candidate list, shortlist it, fetch the
                       JD lazily, apply the first eligible job and persist the
                       queue in data/queue.json
+  --requeue-reason    with --candidates, explicitly allow blocked ids to return
+                      to `new` (recorded in the queue history)
 
 Output (stdout is always one JSON object):
   {
@@ -74,7 +75,8 @@ Output (stdout is always one JSON object):
       "path": "/abs/path/data/queue.json",
       "selection": {"id": "...", "profile": {...}, "decision": {...}},
       "ingested": [{"id": "...", "status": "enqueued", "reason": null}],
-      "record": {"id": "...", "state": "verified", ...}
+      "record": {"id": "...", "state": "verified", ...},
+      "records": [{"id": "...", "state": "verified", ...}]
     }
   }
 
@@ -92,6 +94,7 @@ Examples:
   career-ops-run --candidates data/candidates.json --cv output/cv-renan-react.pdf
   career-ops-run --candidates data/candidates.json --jd-dir data/jd-fixtures \\
     --adapter fake --run-id queue-demo
+  career-ops-run --candidates data/candidates.json --requeue-reason "jd now available"
   career-ops-run --help
 
 The real adapter needs an authenticated CDP browser already running (see the
@@ -127,6 +130,13 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "read JD text files as <job-id>.txt from this directory instead of "
             "LinkedIn's guest endpoint (offline runs and tests)"
+        ),
+    )
+    parser.add_argument(
+        "--requeue-reason",
+        help=(
+            "explicitly allow blocked ids in --candidates mode to return to the "
+            "queue; the reason is recorded in the queue history"
         ),
     )
     parser.add_argument(
@@ -177,6 +187,8 @@ def main(
         parser.error("pass one of --job or --candidates")
     if args.jd_dir and not args.candidates:
         parser.error("--jd-dir requires --candidates")
+    if args.requeue_reason and not args.candidates:
+        parser.error("--requeue-reason requires --candidates")
     job_id = ""
     if args.job is not None:
         job_id = args.job.strip()
@@ -352,13 +364,13 @@ def _run_queue(
             EXIT_PRECONDITION,
         )
 
-    ingested = queue.ingest(candidates)
+    ingested = queue.ingest(candidates, requeue_reason=args.requeue_reason)
     selection = QueueProcessor(queue, fetcher, rules=rules).next_eligible()
     if selection is None:
         payload = _queue_empty_payload(queue=queue, ingested=ingested, cv=cv)
         return _emit(payload, EXIT_FAILED)
 
-    initial_job = _selection_job(selection)
+    initial_job = selection.as_job()
     adapter = _build_adapter(
         args.adapter,
         args.fake_scenario,
@@ -405,17 +417,9 @@ def _run_queue(
         "selection": selection.as_dict(),
         "ingested": [result.as_dict() for result in ingested],
         "record": queue.get(selection.job_id).as_dict(),
+        "records": [record.as_dict() for record in queue.records.values()],
     }
     return _emit(payload, _exit_code(payload))
-
-
-def _selection_job(selection: Selection) -> dict[str, object]:
-    job = selection.candidate.as_dict()
-    job["profile"] = dict(selection.profile) if selection.profile is not None else None
-    job["decision"] = dict(selection.decision) if selection.decision is not None else None
-    if selection.jd_path is not None:
-        job["jd_path"] = str(selection.jd_path)
-    return job
 
 
 def _queue_empty_payload(
@@ -442,6 +446,7 @@ def _queue_empty_payload(
         "path": str(queue.path),
         "selection": None,
         "ingested": [result.as_dict() for result in ingested],
+        "record": None,
         "records": [record.as_dict() for record in queue.records.values()],
     }
     return payload
@@ -462,7 +467,7 @@ def _record_queue_outcome(
         state = "verified"
     elif reason == "waiting_input":
         state = "waiting_input"
-    elif reason in {"already_applied", "job_closed", "no_easy_apply"}:
+    elif reason in _BLOCKER_MESSAGES:
         state = "ineligible"
     else:
         state = "failed"

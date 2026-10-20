@@ -15,6 +15,20 @@ SCRIPTS_DIR = REPO_ROOT / "scripts"
 # replace HOME, and an asdf shim then cannot find its version.
 STABLE_PATH = os.pathsep.join([os.defpath, os.environ.get("PATH", "")])
 
+FRONTEND_JD = """\
+Desenvolvedor Front-end Sênior
+
+Requisitos:
+- React e TypeScript.
+"""
+
+DEVOPS_JD = """\
+Software Engineer
+
+Requirements:
+- Kubernetes and Terraform.
+"""
+
 
 class FakeScreenshotter:
     def __init__(self, payload: bytes = b"png-bytes") -> None:

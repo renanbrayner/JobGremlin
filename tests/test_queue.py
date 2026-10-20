@@ -12,6 +12,7 @@ from career_ops.queue import (
     QueueProcessor,
     load_candidates,
 )
+from conftest import DEVOPS_JD, FRONTEND_JD
 
 
 class CountingFetcher:
@@ -24,14 +25,6 @@ class CountingFetcher:
         if job_id not in self.descriptions:
             raise JobDescriptionMissing(f"JD not found for job {job_id}")
         return JobDescription(job_id=job_id, text=self.descriptions[job_id])
-
-
-FRONTEND_JD = """\
-Desenvolvedor Front-end Sênior
-
-Requisitos:
-- React e TypeScript.
-"""
 
 
 def _candidate(
@@ -140,6 +133,31 @@ def test_a_blocked_id_can_return_only_with_an_explicit_reason(paths):
     assert queue.records["1"].reason == "manual retry"
 
 
+def test_a_candidate_that_becomes_applied_is_removed_from_the_queue(paths):
+    queue = JobQueue.load(paths)
+    queue.ingest([_candidate("1")])
+
+    result = queue.ingest([_candidate("1", applied=True)])
+
+    assert result[0].status == "skipped"
+    assert result[0].reason == "already_applied"
+    assert queue.records["1"].state == "ineligible"
+
+
+def test_an_interrupted_jd_fetch_is_resumed_without_a_requeue(paths):
+    fetcher = CountingFetcher({"1": FRONTEND_JD})
+    queue = JobQueue.load(paths)
+    queue.ingest([_candidate("1")])
+    queue.mark("1", "jd_fetched", None, {"jd_path": "data/jds/1.txt"})
+
+    selection = QueueProcessor(queue, fetcher).next_eligible()
+
+    assert selection is not None
+    assert selection.job_id == "1"
+    assert fetcher.calls == ["1"]
+    assert queue.records["1"].state == "eligible"
+
+
 def test_the_processor_shortlists_fetches_lazily_and_returns_the_first_eligible(paths):
     fetcher = CountingFetcher({"4": FRONTEND_JD, "5": FRONTEND_JD})
     queue = JobQueue.load(paths)
@@ -174,13 +192,7 @@ def test_the_processor_shortlists_fetches_lazily_and_returns_the_first_eligible(
 
 
 def test_an_ineligible_profile_is_recorded_and_processing_continues(paths):
-    devops_jd = """\
-Software Engineer
-
-Requirements:
-- Kubernetes and Terraform.
-"""
-    fetcher = CountingFetcher({"1": devops_jd, "2": FRONTEND_JD})
+    fetcher = CountingFetcher({"1": DEVOPS_JD, "2": FRONTEND_JD})
     queue = JobQueue.load(paths)
     queue.ingest([_candidate("1", title="Software Engineer"), _candidate("2")])
 

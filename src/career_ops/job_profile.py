@@ -9,7 +9,7 @@ skills.  No LLM participates in this step.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Iterable
 
 from career_ops.job_filters import fold
@@ -26,11 +26,6 @@ class JobProfile:
     seniority: ProfileSeniority
     required_skills: tuple[str, ...] = ()
     preferred_skills: tuple[str, ...] = ()
-    title: str = ""
-    company: str = ""
-    location: str = ""
-    workplace: str = ""
-    extra: dict[str, object] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -191,9 +186,6 @@ def build_job_profile(
     jd_text: str,
     *,
     title: str = "",
-    company: str = "",
-    location: str = "",
-    workplace: str = "",
 ) -> JobProfile:
     """Build the auditable profile of one job description."""
     text = jd_text or ""
@@ -205,10 +197,6 @@ def build_job_profile(
         seniority=_detect_seniority(title, text),
         required_skills=required,
         preferred_skills=preferred,
-        title=title,
-        company=company,
-        location=location,
-        workplace=workplace,
     )
 
 
@@ -253,15 +241,15 @@ _SKILL_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
 
 def _skills_in(text: str) -> list[str]:
     folded = fold(text)
-    found: list[tuple[int, int, str]] = []
+    matches: list[tuple[int, int, str]] = []
     for canonical, pattern in _SKILL_PATTERNS:
         for match in pattern.finditer(folded):
-            found.append((match.start(), -(match.end() - match.start()), canonical))
-    found.sort()
+            matches.append((match.start(), match.end(), canonical))
+    # When aliases overlap ("react native" vs "react"), keep the longest match.
+    matches.sort(key=lambda item: (item[0], -(item[1] - item[0])))
     skills: list[str] = []
     covered_until = -1
-    for start, negative_length, canonical in found:
-        end = start - negative_length
+    for start, end, canonical in matches:
         if start < covered_until:
             continue
         if canonical not in skills:

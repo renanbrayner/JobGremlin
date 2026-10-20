@@ -95,15 +95,6 @@ def test_rules_can_be_loaded_from_a_workspace_config(paths: WorkspacePaths):
     )
 
 
-def test_a_configured_required_skills_limit_is_enforced():
-    rules = EligibilityRules(max_required_skills=1)
-
-    decision = evaluate_eligibility(_profile(), rules)
-
-    assert decision.eligible is False
-    assert decision.reason == "too_many_required_skills"
-
-
 def test_the_decision_serializes_for_the_queue_report():
     decision = evaluate_eligibility(_profile())
 

@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Iterable, Mapping
 
 from career_ops.job_profile import JobProfile
+from career_ops.paths import WorkspacePaths
 
 
 @dataclass(frozen=True)
@@ -22,7 +23,6 @@ class EligibilityRules:
     languages: tuple[str, ...] = ("pt", "en")
     families: tuple[str, ...] = ("frontend", "backend", "fullstack", "mobile")
     seniorities: tuple[str, ...] = ("mid", "senior", "unspecified")
-    max_required_skills: int | None = None
 
     def __post_init__(self) -> None:
         for name in ("languages", "families", "seniorities"):
@@ -30,14 +30,11 @@ class EligibilityRules:
             if not values:
                 raise ValueError(f"{name} must not be empty")
             object.__setattr__(self, name, values)
-        if self.max_required_skills is not None and self.max_required_skills < 0:
-            raise ValueError("max_required_skills must not be negative")
 
     @classmethod
-    def from_paths(cls, paths: object) -> "EligibilityRules":
+    def from_paths(cls, paths: WorkspacePaths) -> "EligibilityRules":
         """Load ``config/eligibility.json`` when present, else use defaults."""
-        reader = getattr(paths, "read_config", None)
-        candidate = reader("eligibility.json") if callable(reader) else None
+        candidate = paths.read_config("eligibility.json")
         if candidate is None:
             return cls()
         return cls.from_file(Path(candidate))
@@ -54,7 +51,7 @@ class EligibilityRules:
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, object]) -> "EligibilityRules":
-        known = {"languages", "families", "seniorities", "max_required_skills"}
+        known = {"languages", "families", "seniorities"}
         unknown = set(payload) - known
         if unknown:
             raise ValueError(f"unknown eligibility rule(s): {', '.join(sorted(unknown))}")
@@ -67,15 +64,10 @@ class EligibilityRules:
                 raise ValueError(f"{name} must be a list of strings")
             return tuple(item.strip().lower() for item in value if item.strip())
 
-        limit = payload.get("max_required_skills")
-        if limit is not None and (not isinstance(limit, int) or isinstance(limit, bool)):
-            raise ValueError("max_required_skills must be an integer or null")
-
         return cls(
             languages=strings("languages"),
             families=strings("families"),
             seniorities=strings("seniorities"),
-            max_required_skills=limit,
         )
 
 
@@ -105,17 +97,6 @@ def evaluate_eligibility(
     checks.append(_check("family", profile.family, rules.families))
     checks.append(_check("seniority", profile.seniority, rules.seniorities))
 
-    if rules.max_required_skills is not None:
-        passed = len(profile.required_skills) <= rules.max_required_skills
-        checks.append(
-            {
-                "rule": "required_skills",
-                "passed": passed,
-                "value": len(profile.required_skills),
-                "accepted": rules.max_required_skills,
-            }
-        )
-
     for check in checks:
         if not check["passed"]:
             return EligibilityDecision(
@@ -130,7 +111,6 @@ _REASON_BY_RULE = {
     "language": "language_unsupported",
     "family": "family_not_targeted",
     "seniority": "seniority_not_targeted",
-    "required_skills": "too_many_required_skills",
 }
 
 

@@ -3,12 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-FRONTEND_JD = """\
-Desenvolvedor Front-end Sênior
-
-Requisitos:
-- React e TypeScript.
-"""
+from conftest import DEVOPS_JD, FRONTEND_JD
 
 
 def _cv(workspace: Path) -> Path:
@@ -23,8 +18,8 @@ def _candidates(workspace: Path, items: list[dict]) -> Path:
     return path
 
 
-def _jd_dir(workspace: Path, entries: dict[str, str]) -> Path:
-    root = workspace / "data" / "jd-fixtures"
+def _jd_dir(workspace: Path, entries: dict[str, str], name: str = "jd-fixtures") -> Path:
+    root = workspace / "data" / name
     root.mkdir(parents=True, exist_ok=True)
     for job_id, text in entries.items():
         (root / f"{job_id}.txt").write_text(text, encoding="utf-8")
@@ -43,6 +38,12 @@ def _queue(workspace: Path) -> dict:
 
 def _records(workspace: Path) -> dict[str, dict]:
     return {record["id"]: record for record in _queue(workspace)["records"]}
+
+
+def _payload_record(payload: dict, job_id: str) -> dict:
+    return next(
+        record for record in payload["queue"]["records"] if record["id"] == job_id
+    )
 
 
 def test_a_candidate_list_shortlists_fetches_lazily_and_applies_the_first_eligible(
@@ -205,6 +206,215 @@ def test_a_missing_jd_is_recorded_and_the_flow_continues(run, workspace):
     assert records["1"]["state"] == "failed"
     assert records["1"]["reason"] == "jd_missing"
     assert records["2"]["state"] == "verified"
+
+
+def test_an_ineligible_job_is_reported_with_its_auditable_reason(run, workspace):
+    cv = _cv(workspace)
+    candidates = _candidates(
+        workspace,
+        [
+            {
+                "id": "1",
+                "title": "Software Engineer",
+                "location": "Recife, PE",
+                "workplace": "Remote",
+            }
+        ],
+    )
+    jds = _jd_dir(workspace, {"1": DEVOPS_JD})
+
+    result, payload = _invoke(
+        run,
+        "--candidates",
+        str(candidates),
+        "--jd-dir",
+        str(jds),
+        "--cv",
+        str(cv),
+        "--adapter",
+        "fake",
+        "--run-id",
+        "queue-ineligible",
+    )
+
+    assert result.returncode == 1
+    assert payload["failure"]["reason"] == "no_eligible_job"
+    record = _records(workspace)["1"]
+    assert record["state"] == "ineligible"
+    assert record["reason"] == "family_not_targeted"
+    assert record["profile"]["family"] == "devops"
+    assert record["decision"]["eligible"] is False
+    assert record["decision"]["reason"] == "family_not_targeted"
+
+
+def test_language_rule_is_auditable_through_the_cli(run, workspace):
+    cv = _cv(workspace)
+    (workspace / "config" / "eligibility.json").write_text(
+        json.dumps({"languages": ["pt"]}), encoding="utf-8"
+    )
+    english_jd = """\
+Frontend Developer
+
+Requirements:
+- React and TypeScript.
+"""
+    candidates = _candidates(
+        workspace,
+        [
+            {
+                "id": "1",
+                "title": "React Developer",
+                "location": "Recife, PE",
+                "workplace": "Remote",
+            }
+        ],
+    )
+    jds = _jd_dir(workspace, {"1": english_jd})
+
+    result, payload = _invoke(
+        run,
+        "--candidates",
+        str(candidates),
+        "--jd-dir",
+        str(jds),
+        "--cv",
+        str(cv),
+        "--adapter",
+        "fake",
+        "--run-id",
+        "queue-language",
+    )
+
+    assert result.returncode == 1
+    assert payload["failure"]["reason"] == "no_eligible_job"
+    record = _records(workspace)["1"]
+    assert record["state"] == "ineligible"
+    assert record["decision"]["reason"] == "language_unsupported"
+    assert record["profile"]["language"] == "en"
+
+
+def test_seniority_rule_is_auditable_through_the_cli(run, workspace):
+    cv = _cv(workspace)
+    junior_jd = """\
+Desenvolvedor React
+
+Vaga para desenvolvedor júnior.
+
+Requisitos:
+- React.
+"""
+    candidates = _candidates(
+        workspace,
+        [
+            {
+                "id": "1",
+                "title": "Desenvolvedor React",
+                "location": "Recife, PE",
+                "workplace": "Remote",
+            }
+        ],
+    )
+    jds = _jd_dir(workspace, {"1": junior_jd})
+
+    result, payload = _invoke(
+        run,
+        "--candidates",
+        str(candidates),
+        "--jd-dir",
+        str(jds),
+        "--cv",
+        str(cv),
+        "--adapter",
+        "fake",
+        "--run-id",
+        "queue-seniority",
+    )
+
+    assert result.returncode == 1
+    assert payload["failure"]["reason"] == "no_eligible_job"
+    record = _records(workspace)["1"]
+    assert record["state"] == "ineligible"
+    assert record["decision"]["reason"] == "seniority_not_targeted"
+    assert record["profile"]["seniority"] == "junior"
+
+
+def test_a_blocked_failed_job_returns_only_with_an_explicit_requeue_reason(run, workspace):
+    cv = _cv(workspace)
+    candidates = _candidates(
+        workspace,
+        [
+            {
+                "id": "1",
+                "title": "Desenvolvedor React",
+                "location": "Recife, PE",
+                "workplace": "Remote",
+            }
+        ],
+    )
+    empty_jds = _jd_dir(workspace, {}, "empty-jd-fixtures")
+    jds = _jd_dir(workspace, {"1": FRONTEND_JD}, "jd-fixtures")
+
+    first, first_payload = _invoke(
+        run,
+        "--candidates",
+        str(candidates),
+        "--jd-dir",
+        str(empty_jds),
+        "--cv",
+        str(cv),
+        "--adapter",
+        "fake",
+        "--run-id",
+        "queue-no-jd",
+    )
+    blocked, blocked_payload = _invoke(
+        run,
+        "--candidates",
+        str(candidates),
+        "--jd-dir",
+        str(jds),
+        "--cv",
+        str(cv),
+        "--adapter",
+        "fake",
+        "--run-id",
+        "queue-blocked",
+    )
+    requeued, requeued_payload = _invoke(
+        run,
+        "--candidates",
+        str(candidates),
+        "--jd-dir",
+        str(jds),
+        "--cv",
+        str(cv),
+        "--adapter",
+        "fake",
+        "--run-id",
+        "queue-requeued",
+        "--requeue-reason",
+        "JD now available",
+    )
+
+    assert first.returncode == 1
+    assert first_payload["failure"]["reason"] == "no_eligible_job"
+    first_record = _payload_record(first_payload, "1")
+    assert first_record["state"] == "failed"
+    assert first_record["reason"] == "jd_missing"
+
+    assert blocked.returncode == 1
+    assert blocked_payload["failure"]["reason"] == "no_eligible_job"
+    assert blocked_payload["queue"]["ingested"][0]["reason"] == "blocked:failed"
+    assert _payload_record(blocked_payload, "1")["state"] == "failed"
+
+    assert requeued.returncode == 0
+    assert requeued_payload["status"] == "verified"
+    assert requeued_payload["queue"]["ingested"][0]["status"] == "requeued"
+
+    history = _queue(workspace)["history"]
+    requeue_events = [entry for entry in history if entry["action"] == "requeued"]
+    assert requeue_events[-1]["reason"] == "JD now available"
+    assert _records(workspace)["1"]["state"] == "verified"
 
 
 def test_a_missing_candidate_file_is_a_precondition_error(run, workspace):

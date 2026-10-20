@@ -73,9 +73,9 @@ por padrão. O `cv.md`, quando copiado para o workspace, habilita o fact gate do
 
 ## Desenvolvimento
 
-Requer `uv` e Python 3.11+. O repo fixa Python 3.14 em `.python-version` e
-declara as ferramentas de desenvolvimento em `pyproject.toml`, com versões
-travadas em `uv.lock`.
+Requer `uv` e o Python fixado em `.python-version` (3.14; o pacote declara
+`>=3.11`). O repo declara as ferramentas de desenvolvimento em
+`pyproject.toml`, com versões travadas em `uv.lock`.
 
 ```bash
 uv sync --all-groups
@@ -346,13 +346,21 @@ scripts/career-ops-run --candidates data/candidates.json \
 ```
 
 A fila guarda um registro por `id` e nunca repete um id que já está em estado
-terminal (`title_rejected`, `ineligible`, `waiting_input`, `submitted`,
-`verified`, `applying`) sem um motivo explícito passado a
-`JobQueue.ingest(..., requeue_reason=...)`. Duplicatas dentro da mesma lista e
-em execuções seguintes voltam com `status: "skipped"` e o motivo
-(`duplicate`, `blocked:<estado>`, `already_applied`, `job_closed`, `discarded`).
-Estados usados neste slice: `new`, `title_rejected`, `jd_fetched`, `eligible`,
-`ineligible`, `applying`, `waiting_input`, `failed`, `submitted`, `verified`.
+terminal (`title_rejected`, `ineligible`, `failed`, `waiting_input`, `submitted`,
+`verified`, `applying`) sem um motivo explícito.
+Duplicatas dentro da mesma lista e em execuções seguintes voltam com
+`status: "skipped"` e o motivo (`duplicate`, `blocked:<estado>`,
+`already_applied`, `job_closed`, `discarded`). Se um id já na fila aparecer
+depois como aplicado, fechado ou descartado, ele é movido para `ineligible` com
+o motivo correspondente. Para retomar uma vaga terminal, passe
+`--requeue-reason "<motivo>"`: ela volta para `new`, o motivo fica no histórico
+da fila e a vaga é reavaliada. Estados usados neste slice: `new`,
+`title_rejected`, `jd_fetched`, `eligible`, `ineligible`, `applying`,
+`waiting_input`, `failed`, `submitted`, `verified`.
+
+O campo `history` do `queue.json` é o rastro de auditoria da fila (enfileirado,
+rejeitado, reenfileirado, tentativa e resultado). Ele é separado do
+`events.jsonl` da sessão, que segue o schema de estágios de aplicação.
 
 ### Filtros rápidos (antes da JD)
 
@@ -360,12 +368,14 @@ Estados usados neste slice: `new`, `title_rejected`, `jd_fetched`, `eligible`,
   (`title_qa`), segurança (`title_security`), infraestrutura/DevOps
   (`title_infra`), liderança/arquitetura/gestão (`title_leadership`) e funções
   fora de desenvolvimento (`title_non_dev`). Título vazio vira `title_missing`.
-- **Localização**: aceita remoto em qualquer lugar (`location_remote`) ou
-  presencial na região de Recife (`location_recife_onsite`). Rejeita híbrido em
-  qualquer lugar (`location_hybrid`), presencial fora da região
-  (`location_outside_region`) e localização ausente (`location_missing`). Como a
-  máquina de estados não tem um estado de localização, essa rejeição é gravada
-  como `ineligible` com `detail.filter = "location"`.
+- **Localização**: aceita remoto em qualquer lugar (com `reason: null` e
+  `detail.workplace: "remote"`) ou presencial/híbrido na região de Recife (com
+  `reason: null` e `detail.workplace` `"on_site"` ou `"hybrid"`). Rejeita
+  híbrido fora da região (`location_hybrid`), presencial fora da região
+  (`location_outside_region`) e localização ausente (`location_missing`).
+  Como a máquina de estados explícita não tem um estado de localização, a
+  rejeição fica em `ineligible` com `detail.filter: "location"` e o motivo
+  específico do filtro.
 - Só depois dos dois filtros a JD é buscada. A busca real usa o endpoint guest
   do LinkedIn; `--jd-dir` lê `<job-id>.txt` para rodadas offline. JD ausente
   vira `failed` com `reason: "jd_missing"` e a fila continua na próxima vaga.
@@ -386,18 +396,16 @@ As regras de elegibilidade são configuráveis em `config/eligibility.json`
 {
   "languages": ["pt", "en"],
   "families": ["frontend", "backend", "fullstack", "mobile"],
-  "seniorities": ["mid", "senior", "unspecified"],
-  "max_required_skills": null
+  "seniorities": ["mid", "senior", "unspecified"]
 }
 ```
 
 A decisão é auditável: `reason` é `eligible`, `language_unsupported`,
-`family_not_targeted`, `seniority_not_targeted` ou
-`too_many_required_skills`, e `checks` registra todas as regras avaliadas. A
-vaga elegível é encaminhada ao fluxo de aplicação; o registro passa por
-`applying` e termina em `verified`, `waiting_input`, `ineligible` ou `failed`.
-As demais sobreviventes ficam em `new`, sem JD baixada, para a próxima execução
-ou para o loop diário do ticket #07.
+`family_not_targeted` ou `seniority_not_targeted`, e `checks` registra todas as
+regras avaliadas. A vaga elegível é encaminhada ao fluxo de aplicação; o
+registro passa por `applying` e termina em `verified`, `waiting_input`,
+`ineligible` ou `failed`. As demais sobreviventes ficam em `new`, sem JD
+baixada, para a próxima execução ou para o loop diário do ticket #07.
 
 O JSON de saída em modo fila acrescenta:
 
@@ -406,7 +414,8 @@ O JSON de saída em modo fila acrescenta:
   "path": ".../data/queue.json",
   "selection": {"id": "4411222", "profile": {...}, "decision": {...}},
   "ingested": [{"id": "4411222", "status": "enqueued", "reason": null}],
-  "record": {"id": "4411222", "state": "verified", ...}
+  "record": {"id": "4411222", "state": "verified", ...},
+  "records": [{"id": "4411222", "state": "verified", ...}]
 }
 ```
 
