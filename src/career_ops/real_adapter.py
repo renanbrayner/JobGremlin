@@ -18,6 +18,7 @@ browser and applies the "never retry after a click" rule from ADR 0002.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import time
 from dataclasses import dataclass
@@ -31,6 +32,8 @@ from career_ops.adapter import (
     ApplicationFailed,
     JobInfo,
     LinkedInDailyLimit,
+    ParkedFormLost,
+    PendingQuestion,
     WaitingForInput,
 )
 from career_ops.capture import cdp_screenshotter
@@ -110,6 +113,8 @@ class RealApplicationAdapter:
         jobinfo_timeout: float = DEFAULT_JOBINFO_TIMEOUT_SECONDS,
         verify_attempts: int = DEFAULT_VERIFY_ATTEMPTS,
         verify_delay: float = DEFAULT_VERIFY_DELAY_SECONDS,
+        parked_target: str | None = None,
+        resume_target: str | None = None,
     ) -> None:
         if apply_timeout <= 0 or jobinfo_timeout <= 0:
             raise ValueError("adapter timeouts must be greater than zero")
@@ -124,10 +129,13 @@ class RealApplicationAdapter:
         self.jobinfo_timeout = jobinfo_timeout
         self.verify_attempts = verify_attempts
         self.verify_delay = verify_delay
+        self.parked_target = parked_target
+        self.resume_target = resume_target
         self._runner = runner
         self._sleep = sleep
         self._environ = dict(environ) if environ is not None else None
         self._attached_cv: Path | None = None
+        self._target_id = resume_target
         self._screenshotter = cdp_screenshotter(paths.scripts, runner=runner)
         self._recovery = cdp_unstick_recovery(paths.scripts, runner=runner)
 
@@ -143,9 +151,21 @@ class RealApplicationAdapter:
     def cdp(self) -> Path:
         return self.paths.scripts / "cdp"
 
+    @property
+    def cdp_targets(self) -> Path:
+        return self.paths.scripts / "cdp-targets"
+
     def open(self) -> JobInfo:
+        target_id = self.parked_target
+        if target_id is not None:
+            # A form is parked in its own tab. Open this job in a fresh tab so
+            # the parked renderer is never navigated away.
+            target_id = self._new_tab()
+        argv = [str(self.jobinfo), self.job_id]
+        if target_id is not None:
+            argv.append(target_id)
         output = self._run(
-            [str(self.jobinfo), self.job_id],
+            argv,
             label="open job",
             timeout=self.jobinfo_timeout,
         )
@@ -156,6 +176,8 @@ class RealApplicationAdapter:
         payload = _last_json(output.stdout)
         if not isinstance(payload, dict):
             raise AdapterError("jobinfo did not return the expected JSON object")
+        if target_id is not None:
+            self._target_id = target_id
         return JobInfo(
             id=self.job_id,
             title=str(payload.get("title") or ""),
@@ -168,24 +190,43 @@ class RealApplicationAdapter:
 
     def attach(self, expected_cv: Path) -> None:
         expected_cv = Path(expected_cv)
-        self._preload_cv(expected_cv)
+        resuming = self.resume_target is not None
+        if resuming:
+            assert self.resume_target is not None
+            self._ensure_target(self.resume_target)
+        else:
+            self._preload_cv(expected_cv)
+        argv = [
+            str(self.easyapply),
+            "--url",
+            self.job_url,
+            "--cv",
+            str(expected_cv),
+            "--answers",
+            str(self.answers),
+            "--cv-library-only",
+            "--max-steps",
+            "20",
+        ]
+        if resuming:
+            argv.extend(["--resume", "--target-id", str(self.resume_target)])
         output = self._run(
-            [
-                str(self.easyapply),
-                "--url",
-                self.job_url,
-                "--cv",
-                str(expected_cv),
-                "--answers",
-                str(self.answers),
-                "--cv-library-only",
-                "--max-steps",
-                "20",
-            ],
-            label="fill application form",
+            argv,
+            label="resume application form" if resuming else "fill application form",
             timeout=self.apply_timeout,
         )
-        _raise_if_waiting(output)
+        if resuming and "--resume mas form nao encontrado" in output.stdout:
+            # ``easyapply`` falls back to reopening the job when the form is
+            # gone. That is exactly the lost-tab case: report it instead of
+            # silently rebuilding the form from scratch.
+            raise ParkedFormLost(
+                f"the parked tab {self.resume_target!r} no longer shows the form"
+            )
+        if _is_waiting(output):
+            pending_target = (
+                self.resume_target or self._target_id or self._find_job_target()
+            )
+            _raise_if_waiting(output, target=pending_target)
         _raise_if_daily_limit(output)
         if output.returncode != 0:
             raise ApplicationFailed(
@@ -207,25 +248,28 @@ class RealApplicationAdapter:
 
     def submit(self) -> None:
         expected_cv = self._attached_cv or self.cv
+        argv = [
+            str(self.easyapply),
+            "--resume",
+            "--url",
+            self.job_url,
+            "--cv",
+            str(expected_cv),
+            "--answers",
+            str(self.answers),
+            "--cv-library-only",
+            "--submit",
+            "--max-steps",
+            "20",
+        ]
+        if self._target_id is not None:
+            argv.extend(["--target-id", self._target_id])
         output = self._run(
-            [
-                str(self.easyapply),
-                "--resume",
-                "--url",
-                self.job_url,
-                "--cv",
-                str(expected_cv),
-                "--answers",
-                str(self.answers),
-                "--cv-library-only",
-                "--submit",
-                "--max-steps",
-                "20",
-            ],
+            argv,
             label="submit application",
             timeout=self.apply_timeout,
         )
-        _raise_if_waiting(output)
+        _raise_if_waiting(output, target=self._target_id)
         _raise_if_daily_limit(output)
         # Exit 1 means the submit click happened but the script did not see the
         # confirmation text.  The guard verifies through jobinfo next, so this is
@@ -238,9 +282,12 @@ class RealApplicationAdapter:
 
     def verify(self) -> bool:
         last_error = ""
+        argv = [str(self.jobinfo), self.job_id]
+        if self._target_id is not None:
+            argv.append(self._target_id)
         for attempt in range(1, self.verify_attempts + 1):
             output = self._run(
-                [str(self.jobinfo), self.job_id],
+                argv,
                 label="verify submission",
                 timeout=self.jobinfo_timeout,
             )
@@ -257,7 +304,14 @@ class RealApplicationAdapter:
         return False
 
     def capture(self, path: Path) -> None:
-        self._screenshotter(Path(path))
+        if self._target_id is None:
+            self._screenshotter(Path(path))
+            return
+        cdp_screenshotter(
+            self.paths.scripts,
+            runner=self._runner,
+            target_id=self._target_id,
+        )(Path(path))
 
     def recover(self) -> None:
         self._recovery()
@@ -268,9 +322,58 @@ class RealApplicationAdapter:
         if not isinstance(payload, dict):
             raise AdapterError("the CV selection response is not an object")
 
-    def _cdp_eval(self, script: str, *, label: str) -> object:
+    def _new_tab(self) -> str:
         output = self._run(
-            [str(self.cdp), "eval", script],
+            [str(self.cdp_targets), "--new", self.job_url],
+            label="open application tab",
+            timeout=self.jobinfo_timeout,
+        )
+        if output.returncode != 0:
+            raise AdapterUnavailable(
+                f"cdp-targets could not open a new tab: {_tail(output.stderr or output.stdout)}"
+            )
+        marker = output.stdout.strip()
+        for line in marker.splitlines():
+            if line.strip().startswith("new:"):
+                target_id = line.split(":", 1)[1].strip()
+                if target_id:
+                    return target_id
+        raise AdapterUnavailable(f"cdp-targets did not report a target id: {_tail(marker)}")
+
+    def _targets(self) -> list[tuple[str, str]]:
+        output = self._run(
+            [str(self.cdp_targets), "--page-only"],
+            label="list tabs",
+            timeout=self.jobinfo_timeout,
+        )
+        if output.returncode != 0:
+            raise AdapterUnavailable(
+                f"cdp-targets could not list tabs: {_tail(output.stderr or output.stdout)}"
+            )
+        targets: list[tuple[str, str]] = []
+        for line in output.stdout.splitlines():
+            columns = line.split("\t")
+            if len(columns) >= 2 and columns[1].strip():
+                url = columns[3].strip() if len(columns) >= 4 else ""
+                targets.append((columns[1].strip(), url))
+        return targets
+
+    def _ensure_target(self, target_id: str) -> None:
+        if not any(candidate == target_id for candidate, _ in self._targets()):
+            raise ParkedFormLost(f"the parked tab {target_id!r} no longer exists")
+
+    def _find_job_target(self) -> str | None:
+        for target_id, url in self._targets():
+            if self.job_id and self.job_id in url:
+                return target_id
+        return None
+
+    def _cdp_eval(self, script: str, *, label: str) -> object:
+        argv = [str(self.cdp), "eval", script]
+        if self._target_id is not None:
+            argv.extend(["--target-id", self._target_id])
+        output = self._run(
+            argv,
             label=label,
             timeout=self.jobinfo_timeout,
         )
@@ -369,9 +472,13 @@ def _tail(text: str, limit: int = 400) -> str:
     return text[-limit:] if len(text) > limit else text
 
 
-def _raise_if_waiting(output: CommandOutput) -> None:
-    if output.returncode == 6 or "FORMULARIO EM ESPERA" in output.stdout:
-        raise WaitingForInput(_pending_questions(output.stdout))
+def _is_waiting(output: CommandOutput) -> bool:
+    return output.returncode == 6 or "FORMULARIO EM ESPERA" in output.stdout
+
+
+def _raise_if_waiting(output: CommandOutput, *, target: str | None = None) -> None:
+    if _is_waiting(output):
+        raise WaitingForInput(_pending_questions(output.stdout), target=target)
 
 
 _DAILY_LIMIT_MARKERS = (
@@ -390,12 +497,41 @@ def _raise_if_daily_limit(output: CommandOutput) -> None:
         raise LinkedInDailyLimit()
 
 
-def _pending_questions(stdout: str) -> tuple[str, ...]:
-    questions: list[str] = []
+_RADIO_QUESTION = re.compile(r"^\?\s*\[radio:\s*(.*?)\]\s*(.*)$")
+_SELECT_QUESTION = re.compile(r"^SELECT:\s*(.*?)\s*\[opcoes:\s*(.*?)\]$")
+_CHECK_QUESTION = re.compile(r"^\?\s*\[check\]\s*(.*)$")
+
+
+def _pending_questions(stdout: str) -> tuple[PendingQuestion, ...]:
+    questions: list[PendingQuestion] = []
     for line in stdout.splitlines():
         text = line.strip()
         if not text:
             continue
-        if text.startswith("?") or text.startswith("[radio:") or text.startswith("SELECT:"):
-            questions.append(text)
+        radio = _RADIO_QUESTION.match(text)
+        if radio:
+            options = tuple(
+                option.strip() for option in radio.group(1).split("|") if option.strip()
+            )
+            questions.append(
+                PendingQuestion(text=radio.group(2).strip(), kind="radio", options=options)
+            )
+            continue
+        select = _SELECT_QUESTION.match(text)
+        if select:
+            options = tuple(
+                option.strip() for option in select.group(2).split("|") if option.strip()
+            )
+            questions.append(
+                PendingQuestion(text=select.group(1).strip(), kind="select", options=options)
+            )
+            continue
+        check = _CHECK_QUESTION.match(text)
+        if check:
+            questions.append(PendingQuestion(text=check.group(1).strip(), kind="check"))
+            continue
+        if text.startswith("[radio:") or text.startswith("SELECT:"):
+            questions.append(PendingQuestion(text=text))
+        elif text.startswith("?"):
+            questions.append(PendingQuestion(text=text.lstrip("? ").strip()))
     return tuple(questions)

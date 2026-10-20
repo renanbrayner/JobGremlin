@@ -126,10 +126,18 @@ def cdp_screenshotter(
     *,
     timeout: float = 10.0,
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+    target_id: str | None = None,
 ) -> CommandScreenshotter:
-    """Capture through the copied ``cdp shot`` command."""
+    """Capture through the copied ``cdp shot`` command.
+
+    ``target_id`` binds the capture to the tab that owns the form, so a parked
+    form never replaces the screenshot of the current application.
+    """
+    argv = [str(Path(scripts_dir) / "cdp"), "shot"]
+    if target_id is not None:
+        argv.extend(["--target-id", target_id])
     return CommandScreenshotter(
-        [str(Path(scripts_dir) / "cdp"), "shot"],
+        argv,
         timeout=timeout,
         runner=runner,
     )

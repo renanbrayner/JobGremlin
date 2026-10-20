@@ -9,7 +9,8 @@ must handle:
 * ``timeout``       — the CV upload freezes the renderer on every attempt;
 * ``waiting_input`` — the form stops on a required question and is left open;
 * ``job_closed``    — opening the job reports that it no longer accepts applications;
-* ``daily_limit``   — LinkedIn rejects the attempt because the daily limit was reached.
+* ``daily_limit``   — LinkedIn rejects the attempt because the daily limit was reached;
+* ``lost_tab``      — resuming a parked form finds that its tab is gone.
 """
 
 from __future__ import annotations
@@ -17,7 +18,13 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal, Sequence
 
-from career_ops.adapter import JobInfo, LinkedInDailyLimit, WaitingForInput
+from career_ops.adapter import (
+    JobInfo,
+    LinkedInDailyLimit,
+    ParkedFormLost,
+    PendingQuestion,
+    WaitingForInput,
+)
 from career_ops.renderer import RendererTimeout
 
 FakeScenario = Literal[
@@ -28,6 +35,7 @@ FakeScenario = Literal[
     "waiting_input",
     "job_closed",
     "daily_limit",
+    "lost_tab",
 ]
 FAKE_SCENARIOS: tuple[FakeScenario, ...] = (
     "success",
@@ -37,8 +45,14 @@ FAKE_SCENARIOS: tuple[FakeScenario, ...] = (
     "waiting_input",
     "job_closed",
     "daily_limit",
+    "lost_tab",
 )
 _WRONG_CV = "cv-previous-application.pdf"
+_AUTHORIZED_QUESTION = PendingQuestion(
+    text="Are you authorized to work?",
+    kind="radio",
+    options=("Yes", "No"),
+)
 
 
 class FakeApplicationAdapter:
@@ -50,12 +64,16 @@ class FakeApplicationAdapter:
         job_id: str,
         cv: Path,
         scenario: FakeScenario = "success",
+        resume: bool = False,
+        target: str | None = None,
     ) -> None:
         if scenario not in FAKE_SCENARIOS:
             raise ValueError(f"unknown fake scenario {scenario!r}")
         self.job_id = job_id
         self.cv = Path(cv)
         self.scenario = scenario
+        self.resume = resume
+        self.target = target or f"fake-target-{job_id}"
 
     def open(self) -> JobInfo:
         if self.scenario == "daily_limit":
@@ -71,10 +89,10 @@ class FakeApplicationAdapter:
     def attach(self, expected_cv: Path) -> None:
         if self.scenario == "timeout":
             raise RendererTimeout("upload CV", 1.0)
+        if self.scenario == "lost_tab" and self.resume:
+            raise ParkedFormLost(f"the parked tab {self.target!r} no longer exists")
         if self.scenario == "waiting_input":
-            raise WaitingForInput(
-                ("? [radio: Yes | No]  Are you authorized to work?",)
-            )
+            raise WaitingForInput((_AUTHORIZED_QUESTION,), target=self.target)
 
     def selected_cvs(self) -> Sequence[str]:
         if self.scenario == "wrong_cv":

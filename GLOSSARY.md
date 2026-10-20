@@ -111,6 +111,23 @@ LinkedIn confirmed the application. Only a verified application counts toward
 the daily target.
 _Avoid_: submitted, successful
 
+**Parked form**:
+The single application form left open on an unknown question, recorded in
+`data/parked-form.json` with the job, the pending questions, the CDP target and
+a resume token. The loop continues in another tab while it waits.
+_Avoid_: pending application, queued form
+
+**Parked form limit**:
+The rule that a workspace parks at most one form. A second job that stops on an
+unknown question fails with `parked_form_limit`; it never replaces the parked
+form.
+_Avoid_: waiting queue
+
+**Reply**:
+`career-ops-reply` validates answers, merges them into the workspace answers
+file and resumes the **Parked form** on its stored target.
+_Avoid_: submit (a reply resumes a form; it does not bypass the CV/submit guard)
+
 ## Relationships
 
 - A **Run** contains one or more **Sessions**.
@@ -122,6 +139,8 @@ _Avoid_: submitted, successful
 - A **Job** has one **CV decision**; a **CV cache** hit links the job to an
   existing CV as an additional origin.
 - A **Submitted** application becomes **Verified** only after confirmation.
+- A **Run** parks at most one **Parked form**; a **Reply** resumes it on the
+  stored CDP target and never reopens the form when the tab is still alive.
 
 ## Flagged ambiguities
 

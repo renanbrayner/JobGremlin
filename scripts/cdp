@@ -11,6 +11,9 @@ Uso:
   cdp eval-file <path.js>       idem, com o JS vindo de arquivo (evita aspas)
   cdp shot <path.png>           screenshot
 
+Qualquer comando aceita --target-id <id> para fixar a aba exata (evita navegar
+uma aba com formulario em espera). Sem ele, usa a primeira aba type=page.
+
 Porta: $CDP_PORT, ou /tmp/career-ops-browser-port, ou 9333.
 """
 import base64, json, re, secrets, socket, struct, sys, time, urllib.request
@@ -231,6 +234,12 @@ class CDP:
 def main():
     a = sys.argv[1:]
     if not a: print(__doc__); return 1
+    target_id = ""
+    if "--target-id" in a:
+        idx = a.index("--target-id")
+        target_id = a[idx + 1] if idx + 1 < len(a) else ""
+        del a[idx:idx + 2]
+    if not a: print(__doc__); return 1
     cmd = a[0]
     if cmd == "tabs":
         for t in CDP(port()).list_targets():
@@ -238,7 +247,7 @@ def main():
         return 0
     c = CDP(port())
     try:
-        t = c.connect()
+        t = c.connect_id(target_id) if target_id else c.connect()
         if cmd == "title": print(f"{t.get('title')} | {t.get('url')}")
         elif cmd == "goto":
             sleep = 0.0

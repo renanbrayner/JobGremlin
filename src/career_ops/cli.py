@@ -21,6 +21,7 @@ from career_ops.adapter import (
     AdapterError,
     ApplicationAdapter,
     LinkedInDailyLimit,
+    PendingQuestion,
     WaitingForInput,
 )
 from career_ops.cv_cache import CvCache, CvCacheRules, CvDecision, CvSelector
@@ -34,6 +35,7 @@ from career_ops.job_description import (
 )
 from career_ops.job_profile import JobProfile
 from career_ops.loop import DailyLoop, FileCandidateSource, LoopConfig, LoopOutcome
+from career_ops.parked import ParkedFormLimit, ParkedFormStore
 from career_ops.paths import WorkspacePaths, expand_path, load_environment, resolve_paths
 from career_ops.queue import (
     JobQueue,
@@ -112,6 +114,17 @@ rounds cannot run at once. Progress is persisted in
 data/runs/<run_id>.json; each attempt is a session below
 output/sessions/<run_id>/<job-id>/.
 
+When a form stops on an unknown question (exit 6), its tab stays open and the
+job becomes waiting_input. At most one form is parked (data/parked-form.json);
+the loop continues with the next job in another tab. The output carries the
+questions, options, company and resume token under "waiting_input". Answer them
+with one command:
+  career-ops-reply --run-id <id> --job <id> --token <token> \
+    --answer "<question>=<answer>"
+The answers are merged into config/answers-hermes.json and the form is resumed
+on its stored target without reopening it. A lost tab is reported as
+parked_form_lost and is never counted as sent.
+
 Each daily run also writes report.md, report.html, summary.txt and summary.json
 below output/sessions/<run_id>/ and keeps the last three finished runs
 (CAREER_OPS_RETENTION_RUNS). `career-ops-report --run-id <id>` regenerates them.
@@ -134,6 +147,12 @@ Output (stdout is always one JSON object):
     "artifacts": {"session_dir": "...", "session_json": "...", "events": "...",
                   "screenshots": ["..."]},
     "cv": "/abs/path/cv-....pdf",
+    "waiting_input": null | {          # the single parked form, if any
+      "token": "...", "run_id": "...", "job": {"id": "...", "company": "..."},
+      "target": "CDP-TARGET-ID", "target_goal": 20,
+      "questions": [{"text": "...", "kind": "radio", "options": ["Yes", "No"]}],
+      "resume_hint": "career-ops-reply --run-id ... --job ... --token ..."
+    },
     "run": {"status": "...", "stop_reason": "...", "attempts": 2,
             "verified": 20, "waiting": 0, "state_path": "...",
             "applications": [{"id": "...", "state": "verified", ...}]},
@@ -179,7 +198,7 @@ Exit codes:
   3  missing CV/answers/candidates/JD source, invalid configuration or another
      run holding data/run.lock
   6  the candidate queue was exhausted while a form was waiting for an answer
-     (the parked form is left open)
+     (the parked form is left open; answer it with career-ops-reply)
 
 Examples:
   career-ops-run --job 4411222 --cv output/cv-renan-react.pdf
@@ -447,6 +466,8 @@ def main(
         )
 
     assert cv is not None  # --job mode always resolves a CV or fails above
+    parked_store = ParkedFormStore(paths, clock=clock)
+    parked = parked_store.load()
     adapter = _build_adapter(
         args.adapter,
         args.fake_scenario,
@@ -456,6 +477,7 @@ def main(
         cv=cv,
         answers=answers,
         apply_timeout=apply_timeout,
+        parked_target=parked.target if parked is not None else None,
     )
     watchdog = _build_watchdog(args.adapter, renderer_timeout, apply_timeout)
 
@@ -479,6 +501,12 @@ def main(
                 watchdog=watchdog,
                 job_id=job_id,
                 cv=cv,
+            )
+            payload = _park_if_waiting(
+                payload,
+                store=parked_store,
+                run_id=session.run_id,
+                target_goal=DEFAULT_TARGET,
             )
     except RunLocked as exc:
         return _emit(
@@ -589,6 +617,7 @@ def _run_queue(
         )
 
     decisions: dict[str, CvDecision] = {}
+    parked_store = ParkedFormStore(paths, clock=clock)
 
     def resolve_cv(selection: Selection) -> tuple[Path, CvDecision | None]:
         if cv is not None:
@@ -603,6 +632,12 @@ def _run_queue(
         return decision.cv, decision
 
     def apply(selection: Selection, expected_cv: Path) -> Mapping[str, object]:
+        current = parked_store.load()
+        parked_target = (
+            current.target
+            if current is not None and current.job_id != selection.job_id
+            else None
+        )
         adapter = _build_adapter(
             args.adapter,
             args.fake_scenario,
@@ -612,6 +647,7 @@ def _run_queue(
             cv=expected_cv,
             answers=answers,
             apply_timeout=apply_timeout,
+            parked_target=parked_target,
         )
         watchdog = _build_watchdog(args.adapter, renderer_timeout, apply_timeout)
         session = SessionRecorder.create(
@@ -633,7 +669,12 @@ def _run_queue(
         decision = decisions.get(selection.job_id)
         if decision is not None:
             payload["cv_cache"] = decision.as_dict()
-        return payload
+        return _park_if_waiting(
+            payload,
+            store=parked_store,
+            run_id=run_id,
+            target_goal=args.target,
+        )
 
     video = (
         _build_video(args.adapter)
@@ -710,6 +751,10 @@ def _run_queue(
                     run_id=run_id,
                     environment=environment,
                 )
+                current = parked_store.load()
+                payload["waiting_input"] = (
+                    current.as_dict() if current is not None else None
+                )
                 return _emit(payload, EXIT_FAILED)
             assert outcome is not None
     except RunLocked as exc:
@@ -739,6 +784,8 @@ def _run_queue(
         run_id=run_id,
         environment=environment,
     )
+    current = parked_store.load()
+    payload["waiting_input"] = current.as_dict() if current is not None else None
     return _emit(payload, _loop_exit_code(outcome))
 
 
@@ -953,26 +1000,29 @@ def _run_application(
     job_id: str,
     cv: Path,
     initial_job: Mapping[str, object] | None = None,
+    resume_job: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     session_status = "failed"
+    known_job = resume_job if resume_job is not None else initial_job
     job_payload: dict[str, object] = (
-        dict(initial_job) if initial_job is not None else {"id": job_id}
+        dict(known_job) if known_job is not None else {"id": job_id}
     )
     try:
-        info = adapter.open()
-        job_payload = {**job_payload, **info.as_dict()}
-        _capture(session, "open", job_id)
-        blocker = info.blocker
-        if blocker is not None:
-            message = _BLOCKER_MESSAGES[blocker]
-            session.fail(message, job_id=job_id, detail={"reason": blocker})
-            return _payload(
-                session=session,
-                job=job_payload,
-                cv=cv,
-                result=SubmissionResult(submitted=False, attempts=0, reason=blocker),
-                message=message,
-            )
+        if resume_job is None:
+            info = adapter.open()
+            job_payload = {**job_payload, **info.as_dict()}
+            _capture(session, "open", job_id)
+            blocker = info.blocker
+            if blocker is not None:
+                message = _BLOCKER_MESSAGES[blocker]
+                session.fail(message, job_id=job_id, detail={"reason": blocker})
+                return _payload(
+                    session=session,
+                    job=job_payload,
+                    cv=cv,
+                    result=SubmissionResult(submitted=False, attempts=0, reason=blocker),
+                    message=message,
+                )
 
         guard = SubmissionGuard(session, watchdog, recover=adapter.recover)
         result = guard.submit(job_id=job_id, expected_cv=cv, adapter=adapter)
@@ -1007,6 +1057,8 @@ def _run_application(
             ),
             message=str(exc),
             questions=exc.questions,
+            pending=exc.pending,
+            target=exc.target,
         )
     except LinkedInDailyLimit as exc:
         session.fail(exc, job_id=job_id, detail={"reason": exc.reason})
@@ -1061,6 +1113,8 @@ def _payload(
     result: SubmissionResult,
     message: str,
     questions: Sequence[str] = (),
+    pending: Sequence[PendingQuestion] = (),
+    target: str | None = None,
 ) -> dict[str, object]:
     screenshots = sorted(
         path.relative_to(session.root).as_posix()
@@ -1074,6 +1128,8 @@ def _payload(
         result=result,
         message=message,
         questions=questions,
+        pending=pending,
+        target=target,
         artifacts={
             "session_dir": str(session.root),
             "session_json": str(session.root / "session.json"),
@@ -1119,8 +1175,11 @@ def _envelope(
     message: str,
     artifacts: Mapping[str, object],
     questions: Sequence[str] = (),
+    pending: Sequence[PendingQuestion] = (),
+    target: str | None = None,
 ) -> dict[str, object]:
     failure: dict[str, object] | None = None
+    pending_form: dict[str, object] | None = None
     if not result.verified:
         failure = {
             "reason": result.reason,
@@ -1129,6 +1188,13 @@ def _envelope(
         }
         if questions:
             failure["questions"] = list(questions)
+        if pending:
+            failure["pending"] = [question.as_dict() for question in pending]
+        if pending or result.reason == "waiting_input":
+            pending_form = {
+                "questions": [question.as_dict() for question in pending],
+                "target": target,
+            }
     return {
         "command": COMMAND,
         "status": "verified" if result.verified else "failed",
@@ -1138,6 +1204,8 @@ def _envelope(
         "failure": failure,
         "artifacts": dict(artifacts),
         "cv": str(cv) if cv is not None else None,
+        "waiting_input": None,
+        "pending_form": pending_form,
     }
 
 
@@ -1161,6 +1229,101 @@ def _capture(session: SessionRecorder, stage: str, job_id: str) -> None:
         pass
 
 
+def _park_if_waiting(
+    payload: dict[str, object],
+    *,
+    store: ParkedFormStore,
+    run_id: str,
+    target_goal: int,
+) -> dict[str, object]:
+    """Persist the single parked form and expose its resume token in the JSON."""
+    pending_form = payload.pop("pending_form", None)
+    failure = payload.get("failure")
+    if not isinstance(failure, Mapping) or failure.get("reason") != "waiting_input":
+        return payload
+
+    questions = _pending_questions_from_payload(failure, pending_form)
+    job = payload.get("job")
+    job_payload = dict(job) if isinstance(job, Mapping) else {"id": None}
+    target = (
+        str(pending_form.get("target"))
+        if isinstance(pending_form, Mapping) and pending_form.get("target") is not None
+        else None
+    )
+    artifacts = payload.get("artifacts")
+    session_dir = (
+        str(artifacts.get("session_dir"))
+        if isinstance(artifacts, Mapping) and artifacts.get("session_dir") is not None
+        else None
+    )
+    cv = payload.get("cv")
+    try:
+        parked = store.park(
+            run_id=run_id,
+            job=job_payload,
+            questions=questions,
+            target=target,
+            cv=str(cv) if isinstance(cv, str) and cv else None,
+            session_dir=session_dir,
+            target_goal=target_goal,
+        )
+    except ParkedFormLimit as exc:
+        return _mark_parked_form_limit(payload, exc)
+    payload["waiting_input"] = parked.as_dict()
+    return payload
+
+
+def _pending_questions_from_payload(
+    failure: Mapping[str, object],
+    pending_form: object,
+) -> tuple[PendingQuestion, ...]:
+    if isinstance(pending_form, Mapping):
+        raw = pending_form.get("questions")
+        if isinstance(raw, list):
+            parsed = [
+                PendingQuestion.from_mapping(item)
+                for item in raw
+                if isinstance(item, Mapping)
+            ]
+            if parsed:
+                return tuple(parsed)
+    raw_pending = failure.get("pending")
+    if isinstance(raw_pending, list):
+        parsed = [
+            PendingQuestion.from_mapping(item)
+            for item in raw_pending
+            if isinstance(item, Mapping)
+        ]
+        if parsed:
+            return tuple(parsed)
+    raw_questions = failure.get("questions")
+    if isinstance(raw_questions, list):
+        return tuple(PendingQuestion(text=str(question)) for question in raw_questions)
+    return ()
+
+
+def _mark_parked_form_limit(
+    payload: dict[str, object],
+    exc: ParkedFormLimit,
+) -> dict[str, object]:
+    """A second form cannot replace the parked one; fail this job instead."""
+    message = str(exc)
+    result = payload.get("result")
+    if isinstance(result, Mapping):
+        updated_result = dict(result)
+        updated_result["reason"] = "parked_form_limit"
+        updated_result["retryable"] = False
+        payload["result"] = updated_result
+    payload["status"] = "failed"
+    payload["failure"] = {
+        "reason": "parked_form_limit",
+        "message": message,
+        "retryable": False,
+    }
+    payload["waiting_input"] = None
+    return payload
+
+
 def _build_adapter(
     adapter_name: str,
     scenario: FakeScenario,
@@ -1171,6 +1334,7 @@ def _build_adapter(
     cv: Path,
     answers: Path | None,
     apply_timeout: float,
+    parked_target: str | None = None,
 ) -> ApplicationAdapter:
     if adapter_name == "fake":
         return FakeApplicationAdapter(job_id=job_id, cv=cv, scenario=scenario)
@@ -1183,6 +1347,7 @@ def _build_adapter(
         answers=answers,
         environ=environment,
         apply_timeout=apply_timeout,
+        parked_target=parked_target,
     )
 
 

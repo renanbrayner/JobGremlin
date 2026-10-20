@@ -262,12 +262,13 @@ scripts/career-ops-run --job 4411222 --cv output/cv-renan-react.pdf \
   --adapter fake --fake-scenario success
 ```
 
-O adaptador fake (`--adapter fake`) aceita sete cenários: `success`,
+O adaptador fake (`--adapter fake`) aceita oito cenários: `success`,
 `failure` (envio sem confirmação), `wrong_cv` (PDF anterior selecionado),
 `timeout` (upload do CV congela o renderer), `waiting_input` (formulário para
-numa pergunta e fica aberto, exit `6`), `job_closed` (vaga fechada) e
-`daily_limit` (limite diário do LinkedIn). Ele executa o mesmo orquestrador e
-grava uma sessão real em `output/sessions/<run_id>/`, sem tocar no LinkedIn.
+numa pergunta e fica aberto, exit `6`), `job_closed` (vaga fechada),
+`daily_limit` (limite diário do LinkedIn) e `lost_tab` (a retomada não encontra
+mais a aba estacionada). Ele executa o mesmo orquestrador e grava uma sessão
+real em `output/sessions/<run_id>/`, sem tocar no LinkedIn.
 
 Saída (resumida):
 
@@ -293,8 +294,8 @@ Saída (resumida):
 
 Exit codes: `0` verificado, `1` não verificado, `2` argumentos inválidos, `3`
 CV/answers/configuração ausente (ou lock ocupado) e `6` fila esgotada com um
-formulário aguardando resposta (a aba fica aberta). `--help` imprime o texto
-humano, o schema e os exit codes.
+formulário aguardando resposta (a aba fica aberta; responda com
+`career-ops-reply`). `--help` imprime o texto humano, o schema e os exit codes.
 
 O adaptador real embrulha os scripts copiados sem alterá-los:
 
@@ -556,6 +557,61 @@ cria sessão.
 Cada tentativa grava uma sessão própria em
 `output/sessions/<run_id>/<job-id>/` (a segunda tentativa da mesma vaga vira
 `<job-id>-2/`), com `run_id` igual em todos os eventos da rodada.
+
+## Formulário em espera e `career-ops-reply`
+
+Quando um formulário pede uma resposta que não está no arquivo de respostas, o
+`easyapply` devolve exit `6` e **deixa a aba aberta**. O loop marca a vaga como
+`waiting_input`, grava o formulário em `data/parked-form.json` e continua na
+próxima vaga, abrindo-a em outra aba para não destruir a que espera. Só existe
+**um formulário estacionado por workspace**: se uma segunda vaga também parar
+numa pergunta, ela termina como `failed` com motivo `parked_form_limit` e o
+formulário original permanece intocado.
+
+O JSON da rodada expõe as perguntas pendentes com vaga, empresa, opções e token:
+
+```json
+"waiting_input": {
+  "token": "a1b2c3d4e5f6a7b8",
+  "run_id": "daily-2026-10-20",
+  "job": {"id": "4411222", "company": "Acme", "title": "React Engineer"},
+  "target": "CDP-TARGET-ID",
+  "target_goal": 20,
+  "questions": [
+    {"text": "Are you authorized to work?", "kind": "radio",
+     "options": ["Yes", "No"]}
+  ],
+  "resume_hint": "career-ops-reply --run-id ... --job ... --token ..."
+}
+```
+
+Uma única chamada valida as respostas, grava no arquivo de respostas do
+workspace (`config/answers-hermes.json`, nunca no upstream), retoma a aba e o
+target corretos e continua o preenchimento sem reabrir o formulário:
+
+```bash
+scripts/career-ops-reply --run-id daily-2026-10-20 --job 4411222 \
+  --token a1b2c3d4e5f6a7b8 --answer "Are you authorized to work?=Yes"
+
+# ensaio sem navegador
+scripts/career-ops-reply --run-id daily-2026-10-20 --job 4411222 \
+  --token a1b2c3d4e5f6a7b8 --answer "Are you authorized to work?=Yes" \
+  --adapter fake --fake-scenario success
+```
+
+A chave de `--answer` pode ser o texto completo da pergunta ou um trecho único;
+em perguntas de rádio/select o valor precisa ser uma das opções listadas.
+`--answers` aceita um objeto JSON (texto ou caminho) e `--answers-file` troca o
+arquivo de destino dentro do workspace. A retomada usa o `target` gravado e
+`easyapply --resume --target-id`; se a aba sumiu, a vaga termina como `failed`
+com `reason: "parked_form_lost"` e `retryable: true`, nunca como enviada.
+
+Exit codes do `career-ops-reply`: `0` verificado, `1` falha/não confirmado,
+`2` resposta inválida ou argumento inválido, `3` sem formulário estacionado,
+token/run/vaga divergentes, CV perdido ou arquivo de respostas não gravável, e
+`6` o formulário retomado parou em outra pergunta (continua estacionado). O
+comando só expõe o contrato; a ponte com Hermes/Telegram e o cron ficam fora
+deste escopo.
 
 ## Relatório, retenção e vídeo
 

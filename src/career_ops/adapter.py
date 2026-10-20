@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol, Sequence
+from typing import Mapping, Protocol, Sequence
 
 from career_ops.submission import SubmissionAdapter
 
@@ -43,13 +43,82 @@ class ApplicationFailed(AdapterError):
     reason = "application_failed"
 
 
+class ParkedFormLost(AdapterError):
+    """The tab holding a parked form no longer exists.
+
+    The application may not have been submitted; the job must be reported as a
+    recoverable failure so a later round can decide what to do, never as sent.
+    """
+
+    reason = "parked_form_lost"
+
+
+@dataclass(frozen=True)
+class PendingQuestion:
+    """One unanswered form field, with the options needed to answer it."""
+
+    text: str
+    kind: str = "text"
+    options: tuple[str, ...] = ()
+
+    @property
+    def answer_key(self) -> str:
+        return self.text
+
+    def as_text(self) -> str:
+        """Legacy one-line form printed by ``easyapply`` and shown to humans."""
+        if self.kind == "radio" and self.options:
+            return f"? [radio: {' | '.join(self.options)}]  {self.text}"
+        if self.kind == "check":
+            return f"? [check] {self.text}"
+        if self.kind == "select" and self.options:
+            return f"SELECT: {self.text} [opcoes: {' | '.join(self.options)}]"
+        return f"? {self.text}"
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "text": self.text,
+            "kind": self.kind,
+            "options": list(self.options),
+        }
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object]) -> "PendingQuestion":
+        text = str(payload.get("text") or "").strip()
+        if not text:
+            raise ValueError("pending question is missing a non-empty text")
+        raw_options = payload.get("options")
+        options = (
+            tuple(str(option) for option in raw_options if str(option).strip())
+            if isinstance(raw_options, (list, tuple))
+            else ()
+        )
+        return cls(
+            text=text,
+            kind=str(payload.get("kind") or "text"),
+            options=options,
+        )
+
+
 class WaitingForInput(AdapterError):
     """A required form question has no answer, so the form was left open."""
 
     reason = "waiting_input"
 
-    def __init__(self, questions: Sequence[str] = ()) -> None:
-        self.questions = tuple(questions)
+    def __init__(
+        self,
+        questions: Sequence[str | PendingQuestion] = (),
+        *,
+        target: str | None = None,
+    ) -> None:
+        self.pending = tuple(
+            question
+            if isinstance(question, PendingQuestion)
+            else PendingQuestion(text=str(question))
+            for question in questions
+        )
+        self.questions = tuple(question.as_text() for question in self.pending)
+        self.target = target
         detail = f" ({len(self.questions)} pending question(s))" if self.questions else ""
         super().__init__(f"application is waiting for an answer{detail}")
 

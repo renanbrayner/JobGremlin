@@ -5,10 +5,15 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/paths.sh
 . "$SCRIPT_DIR/lib/paths.sh"
 
-ID="${1:?uso: jobinfo <job-id>}"
+ID="${1:?uso: jobinfo <job-id> [target-id]}"
+TARGET_ID="${2:-}"
 P="${CDP_BIN:-$CAREER_OPS_SCRIPTS/cdp}"
-timeout 40 "$P" goto "https://www.linkedin.com/jobs/view/$ID/" --sleep 4 >/dev/null 2>&1
-timeout 25 "$P" eval "(()=>{const t=(document.body.innerText||'').replace(/\s+/g,' ');
+CDP_TARGET=()
+if [ -n "$TARGET_ID" ]; then
+  CDP_TARGET=(--target-id "$TARGET_ID")
+fi
+timeout 40 "$P" "${CDP_TARGET[@]}" goto "https://www.linkedin.com/jobs/view/$ID/" --sleep 4 >/dev/null 2>&1
+timeout 25 "$P" "${CDP_TARGET[@]}" eval "(()=>{const t=(document.body.innerText||'').replace(/\s+/g,' ');
 const h1=document.querySelector('h1')?document.querySelector('h1').innerText.trim():'';
 const comp=(document.querySelector('.job-details-jobs-unified-top-card__company-name, a[href*=\"/company/\"]')||{}).innerText||'';
 const applied=/Candidatura enviada|Applied \d|Candidatura foi enviada/i.test(t);

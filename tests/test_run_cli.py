@@ -278,6 +278,79 @@ def test_the_real_adapter_opens_a_job_through_jobinfo(paths):
     assert runner.calls[0][1] == "4411222"
 
 
+def test_the_real_adapter_opens_the_next_job_in_a_new_tab_when_one_is_parked(paths):
+    runner = ScriptedRunner(
+        completed_process(["cdp-targets"], stdout="new: target-2\n"),
+        completed_process(
+            ["jobinfo"],
+            stdout=json.dumps({"title": "React Engineer", "applied": False}) + "\n",
+        ),
+    )
+    adapter = _adapter(paths, runner, parked_target="target-1")
+
+    info = adapter.open()
+
+    assert info.id == "4411222"
+    assert [Path(call[0]).name for call in runner.calls] == ["cdp-targets", "jobinfo"]
+    assert runner.calls[0][1] == "--new"
+    assert runner.calls[1][1] == "4411222"
+    assert runner.calls[1][2] == "target-2"
+
+
+def test_the_real_adapter_resumes_the_parked_tab_without_reopening_the_form(paths):
+    runner = ScriptedRunner(
+        completed_process(
+            ["cdp-targets"],
+            stdout="page\ttarget-1\tJob\thttps://www.linkedin.com/jobs/view/4411222/\n",
+        ),
+        completed_process(["easyapply"], stdout="continuando\n"),
+        completed_process(["cdp"], stdout='{"status":"already_selected"}\n'),
+    )
+    adapter = _adapter(paths, runner, resume_target="target-1")
+
+    adapter.attach(adapter.cv)
+
+    assert [Path(call[0]).name for call in runner.calls] == [
+        "cdp-targets",
+        "easyapply",
+        "cdp",
+    ]
+    easyapply = runner.calls[1]
+    assert "--resume" in easyapply
+    assert easyapply[easyapply.index("--target-id") + 1] == "target-1"
+
+
+def test_the_real_adapter_reports_a_missing_parked_tab(paths):
+    from career_ops.adapter import ParkedFormLost
+
+    runner = ScriptedRunner(
+        completed_process(["cdp-targets"], stdout="page\tother-tab\tJob\thttps://x/\n"),
+    )
+    adapter = _adapter(paths, runner, resume_target="target-1")
+
+    with pytest.raises(ParkedFormLost):
+        adapter.attach(adapter.cv)
+
+
+def test_the_real_adapter_never_reopens_a_form_that_disappeared(paths):
+    from career_ops.adapter import ParkedFormLost
+
+    runner = ScriptedRunner(
+        completed_process(
+            ["cdp-targets"],
+            stdout="page\ttarget-1\tJob\thttps://www.linkedin.com/jobs/view/4411222/\n",
+        ),
+        completed_process(
+            ["easyapply"],
+            stdout=">> --resume mas form nao encontrado. Abrindo do zero...\n",
+        ),
+    )
+    adapter = _adapter(paths, runner, resume_target="target-1")
+
+    with pytest.raises(ParkedFormLost):
+        adapter.attach(adapter.cv)
+
+
 @pytest.mark.parametrize(
     ("payload", "blocker"),
     [
@@ -333,6 +406,11 @@ def test_the_real_adapter_reports_exit_6_as_waiting_for_input(paths):
                 "⚠ FORMULARIO EM ESPERA — respostas necessarias acima.\n"
             ),
         ),
+        completed_process(
+            ["cdp-targets"],
+            stdout="page\ttarget-1\tJob\t"
+            "https://www.linkedin.com/jobs/view/4411222/\n",
+        ),
     )
     adapter = _adapter(paths, runner)
 
@@ -342,6 +420,8 @@ def test_the_real_adapter_reports_exit_6_as_waiting_for_input(paths):
     assert caught.value.questions == (
         "? [radio: Yes | No]  Are you authorized to work?",
     )
+    assert caught.value.target == "target-1"
+    assert caught.value.pending[0].options == ("Yes", "No")
 
 
 def test_the_real_adapter_maps_a_subprocess_timeout_to_renderer_timeout(paths):
