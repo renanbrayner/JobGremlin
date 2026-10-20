@@ -48,6 +48,31 @@ def read_events(recorder) -> list[dict]:
     ]
 
 
+def invoke(run, *args: str) -> tuple:
+    """Run ``career-ops-run`` and decode its JSON envelope."""
+    result = run("career-ops-run", *args)
+    payload = json.loads(result.stdout) if result.stdout.strip() else None
+    return result, payload
+
+
+def write_cv(workspace: Path, name: str = "cv-renan-react-2026-10-19.pdf") -> Path:
+    path = workspace / "output" / name
+    path.write_bytes(b"%PDF-fake")
+    return path
+
+
+def write_jd_fixtures(
+    workspace: Path,
+    entries: dict[str, str],
+    name: str = "jd-fixtures",
+) -> Path:
+    root = workspace / "data" / name
+    root.mkdir(parents=True, exist_ok=True)
+    for job_id, text in entries.items():
+        (root / f"{job_id}.txt").write_text(text, encoding="utf-8")
+    return root
+
+
 class ScriptedRunner:
     """Stand-in for subprocess.run that returns a scripted sequence.
 

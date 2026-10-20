@@ -7,18 +7,7 @@ import pytest
 
 from career_ops.paths import WorkspacePaths
 from career_ops.real_adapter import RealApplicationAdapter
-from conftest import ScriptedRunner, completed_process
-
-
-def _cv(workspace: Path, name: str = "cv-renan-react-2026-10-19.pdf") -> Path:
-    path = workspace / "output" / name
-    path.write_bytes(b"%PDF-fake")
-    return path
-
-
-def _invoke(run, *args: str) -> tuple:
-    result = run("career-ops-run", *args)
-    return result, json.loads(result.stdout)
+from conftest import ScriptedRunner, completed_process, invoke, write_cv
 
 
 def _events(session_dir: Path) -> list[dict]:
@@ -30,9 +19,9 @@ def _events(session_dir: Path) -> list[dict]:
 
 
 def test_a_verified_run_writes_a_complete_session_and_returns_success(run, workspace):
-    cv = _cv(workspace)
+    cv = write_cv(workspace)
 
-    result, payload = _invoke(
+    result, payload = invoke(
         run,
         "--job",
         "4411222",
@@ -91,9 +80,9 @@ def test_a_verified_run_writes_a_complete_session_and_returns_success(run, works
 
 
 def test_an_unconfirmed_submission_is_a_failed_run(run, workspace):
-    cv = _cv(workspace)
+    cv = write_cv(workspace)
 
-    result, payload = _invoke(
+    result, payload = invoke(
         run,
         "--job",
         "4411222",
@@ -121,9 +110,9 @@ def test_an_unconfirmed_submission_is_a_failed_run(run, workspace):
 
 
 def test_a_wrong_cv_aborts_before_submit_and_is_never_counted(run, workspace):
-    cv = _cv(workspace)
+    cv = write_cv(workspace)
 
-    result, payload = _invoke(
+    result, payload = invoke(
         run,
         "--job",
         "4411222",
@@ -153,9 +142,9 @@ def test_a_wrong_cv_aborts_before_submit_and_is_never_counted(run, workspace):
 
 
 def test_a_renderer_timeout_exhausts_attempts_with_evidence(run, workspace):
-    cv = _cv(workspace)
+    cv = write_cv(workspace)
 
-    result, payload = _invoke(
+    result, payload = invoke(
         run,
         "--job",
         "4411222",
@@ -186,7 +175,7 @@ def test_a_renderer_timeout_exhausts_attempts_with_evidence(run, workspace):
 
 
 def test_a_missing_cv_fails_before_a_session_is_created(run, workspace):
-    result, payload = _invoke(run, "--job", "4411222", "--adapter", "fake")
+    result, payload = invoke(run, "--job", "4411222", "--adapter", "fake")
 
     assert result.returncode == 3
     assert payload["status"] == "failed"
@@ -197,12 +186,12 @@ def test_a_missing_cv_fails_before_a_session_is_created(run, workspace):
 
 
 def test_the_newest_workspace_cv_is_the_default(run, workspace):
-    older = _cv(workspace, "cv-renan-older.pdf")
-    newer = _cv(workspace, "cv-renan-newer.pdf")
+    older = write_cv(workspace, "cv-renan-older.pdf")
+    newer = write_cv(workspace, "cv-renan-newer.pdf")
     older.touch()
     newer.touch()
 
-    result, payload = _invoke(
+    result, payload = invoke(
         run,
         "--job",
         "4411222",
@@ -402,9 +391,9 @@ def test_the_real_adapter_submits_through_easyapply_and_verifies_with_jobinfo(pa
 
 
 def test_a_waiting_form_returns_exit_6_and_keeps_the_question(run, workspace):
-    cv = _cv(workspace)
+    cv = write_cv(workspace)
 
-    result, payload = _invoke(
+    result, payload = invoke(
         run,
         "--job",
         "4411222",
@@ -434,9 +423,9 @@ def test_a_waiting_form_returns_exit_6_and_keeps_the_question(run, workspace):
 
 def test_the_real_adapter_without_answers_fails_before_a_session(run, workspace, fake_upstream):
     (fake_upstream / "config" / "answers-hermes.json").unlink()
-    cv = _cv(workspace)
+    cv = write_cv(workspace)
 
-    result, payload = _invoke(run, "--job", "4411222", "--cv", str(cv))
+    result, payload = invoke(run, "--job", "4411222", "--cv", str(cv))
 
     assert result.returncode == 3
     assert payload["result"]["reason"] == "answers_missing"
@@ -445,10 +434,10 @@ def test_the_real_adapter_without_answers_fails_before_a_session(run, workspace,
 
 
 def test_a_cv_path_in_the_environment_is_expanded(run, workspace, env):
-    cv = _cv(workspace)
+    cv = write_cv(workspace)
     env["CAREER_OPS_CV"] = "$CAREER_OPS_OUTPUT/" + cv.name
 
-    result, payload = _invoke(
+    result, payload = invoke(
         run,
         "--job",
         "4411222",

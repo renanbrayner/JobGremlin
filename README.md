@@ -63,6 +63,7 @@ Os caminhos podem ser definidos por variáveis de ambiente ou por um arquivo
 | `CAREER_OPS_SCRIPTS` | `$CAREER_OPS_HOME/scripts` | scripts copiados |
 | `CAREER_OPS_RENDERER_TIMEOUT_SECONDS` | `30` | prazo rígido por operação do navegador |
 | `CAREER_OPS_APPLY_TIMEOUT_SECONDS` | `420` | prazo de um `easyapply` completo por vaga |
+| `CAREER_OPS_CV_MIN_SCORE` | `0.90` | similaridade mínima para reutilizar um CV do cache |
 | `CAREER_OPS_ENV_FILE` | `$CAREER_OPS_CONFIG/career-ops.env` | arquivo de override |
 
 Configurações pessoais (por exemplo `config/profile.yml`,
@@ -106,6 +107,9 @@ Os testes cobrem:
   confirmado, CV errado, timeout e CV ausente), incluindo o JSON e a sessão;
 - fila de candidatos, filtros de título e localização, perfil estruturado da JD,
   elegibilidade determinística, dedupe e JD ausente;
+- cache de CV: hit exato, alta similaridade, idioma, família, senioridade,
+  must-have faltando, score abaixo do threshold, geração no miss, origem
+  adicional no hit e tailoring chamado só no miss;
 - o adaptador real embrulha `jobinfo`/`easyapply`/`cdp` sem alterar os scripts;
 - garantia de que os comandos não alteram o upstream falso.
 
@@ -422,6 +426,74 @@ O JSON de saída em modo fila acrescenta:
 Se nenhuma vaga passar pelos filtros e pela elegibilidade, o comando devolve
 exit `1` com `failure.reason = "no_eligible_job"` e a fila completa no JSON.
 
+## Cache e geração de CV
+
+No modo `--candidates`, quando nenhum `--cv` é passado (e `CAREER_OPS_CV` não
+está definido), cada vaga elegível reutiliza um CV compatível ou gera um novo.
+Cada CV gerado recebe um identificador legível com família, stack, idioma,
+senioridade e fingerprint de competências:
+
+```
+output/cv-cache/cv-frontend-react-typescript-pt-senior-8f14e45fceea.pdf
+data/cv-cache/index.json                     # índice consultável
+data/cv-cache/cv-frontend-react-typescript-pt-senior-8f14e45fceea.json
+```
+
+O índice guarda path, idioma, família, senioridade, skills e fingerprint; o
+arquivo por CV acrescenta `created_at`, `updated_at` e as vagas de origem. Um
+cache hit reutiliza o PDF existente e adiciona a vaga às origens; um miss gera
+um PDF novo e o indexa. O `openai-tailor` só é chamado no miss.
+
+O reuso é conservador e exige **todos** os gates:
+
+- mesmo idioma;
+- família compatível (`fullstack` serve `frontend`/`backend`; o contrário não);
+- mesma senioridade (ou `unspecified` de um dos lados);
+- nenhuma skill obrigatória faltando;
+- similaridade ponderada `>= 0.90` (skill obrigatória pesa 3, preferida pesa 1).
+
+O threshold é configurável em `config/cv-cache.json`, por
+`CAREER_OPS_CV_MIN_SCORE` ou por `--cv-min-score`:
+
+```json
+{"min_score": 0.95}
+```
+
+Cada execução de fila acrescenta ao JSON:
+
+```json
+"cv_cache": {
+  "hit": false,
+  "reason": "cache_miss",
+  "miss_reason": "score_below_threshold",
+  "score": 0.857,
+  "threshold": 0.9,
+  "cv_id": "cv-frontend-react-typescript-pt-senior-8f14e45fceea",
+  "cv": ".../output/cv-cache/cv-...pdf",
+  "fingerprint": "8f14e45fceea",
+  "considered": 2,
+  "missing_required": []
+}
+```
+
+`miss_reason` é um dos `cache_empty`, `language_mismatch`,
+`family_incompatible`, `seniority_incompatible`, `must_have_missing`,
+`score_below_threshold`, `no_skills` ou `cv_file_missing`. A decisão também é
+gravada em `queue.json` (`record.detail.cv_cache` e `record.detail.cv`) para o
+relatório do ticket #08.
+
+Um `--cv` explícito continua sendo override manual: ele ignora o cache e não
+chama o tailor. O CV gerado nunca contém o nome da empresa; o relatório enviado
+ao tailor é montado só do perfil estruturado, a JD é redigida e um HTML que
+ainda contenha o nome da empresa é rejeitado. A cover letter permanece
+específica por vaga e não entra no cache.
+
+Com `--adapter fake`, a geração usa um `FakeCvTailor` local: ele grava um PDF de
+placeholder e uma linha por chamada em `data/tailor-calls.jsonl`, o que permite
+provar em teste que o tailor só rodou no miss. O tailor real fica atrás de
+`career_ops.cv_tailoring.CommandCvTailor` e escreve em um staging root sob
+`data/cv-cache/work/`, sem tocar no checkout upstream.
+
 ## Navegador em paralelo
 
 Por padrão os scripts usam o mesmo perfil e a mesma porta CDP do sistema atual
@@ -436,10 +508,12 @@ CDP_PORT=9334 scripts/career-ops-browser
 ## Limitações conhecidas deste slice
 
 - `career-ops-run` já aplica **uma** vaga explícita ou a primeira vaga elegível
-  de uma lista persistente. O loop diário com meta de 20, cache/geração de CV,
-  `career-ops-reply`, `career-ops-status`, `career-ops-report` e
-  `career-ops-help --json` ainda são construídos nos próximos tickets.
-- O build de CV delega aos helpers do upstream. O HTML/PDF e o índice de PDFs
-  são gravados em `output/` e `data/`; para o fact gate completo, copie
-  `cv.md`/`config/profile.yml` para o workspace quando quiser uma visão local.
+  de uma lista persistente, com cache/geração de CV no modo fila. O loop diário
+  com meta de 20, `career-ops-reply`, `career-ops-status`,
+  `career-ops-report` e `career-ops-help --json` ainda são construídos nos
+  próximos tickets.
+- O build de CV delega aos helpers do upstream (`openai-tailor.mjs` e
+  `generate-pdf.mjs`), copiando `cv.md`/`config/profile.yml` para um staging root
+  do workspace. O tailor real é validado por testes com runner injetado e pelo
+  smoke manual; a suíte automatizada nunca chama o modelo.
 - A integração com Hermes, Telegram, cron e allowlist está fora deste escopo.

@@ -8,9 +8,11 @@ skills.  No LLM participates in this step.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Iterable, Mapping
 
 from career_ops.job_filters import fold
 
@@ -35,6 +37,44 @@ class JobProfile:
             "required_skills": list(self.required_skills),
             "preferred_skills": list(self.preferred_skills),
         }
+
+    def skills_fingerprint(self) -> str:
+        """Stable fingerprint of the skill set, independent of extraction order."""
+        required = set(self.required_skills)
+        payload = {
+            "required": sorted(required),
+            "preferred": sorted(set(self.preferred_skills) - required),
+        }
+        encoded = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()[:12]
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, object]) -> "JobProfile":
+        """Rebuild a profile stored in the queue or in a cache entry."""
+        if not isinstance(payload, Mapping):
+            raise ValueError("job profile must be an object")
+
+        def text(name: str) -> str:
+            value = payload.get(name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"job profile field {name!r} must be a non-empty string")
+            return value.strip()
+
+        def skills(name: str) -> tuple[str, ...]:
+            value = payload.get(name, [])
+            if not isinstance(value, (list, tuple)) or not all(
+                isinstance(skill, str) and skill.strip() for skill in value
+            ):
+                raise ValueError(f"job profile field {name!r} must be a list of strings")
+            return tuple(skill.strip() for skill in value)
+
+        return cls(
+            language=text("language"),
+            family=text("family"),
+            seniority=text("seniority"),
+            required_skills=skills("required_skills"),
+            preferred_skills=skills("preferred_skills"),
+        )
 
 
 _PT_WORDS = frozenset(

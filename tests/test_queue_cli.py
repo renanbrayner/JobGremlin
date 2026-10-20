@@ -3,33 +3,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from conftest import DEVOPS_JD, FRONTEND_JD
-
-
-def _cv(workspace: Path) -> Path:
-    path = workspace / "output" / "cv-renan-react-2026-10-19.pdf"
-    path.write_bytes(b"%PDF-fake")
-    return path
+from conftest import DEVOPS_JD, FRONTEND_JD, invoke, write_cv, write_jd_fixtures
 
 
 def _candidates(workspace: Path, items: list[dict]) -> Path:
     path = workspace / "data" / "candidates.json"
     path.write_text(json.dumps(items), encoding="utf-8")
     return path
-
-
-def _jd_dir(workspace: Path, entries: dict[str, str], name: str = "jd-fixtures") -> Path:
-    root = workspace / "data" / name
-    root.mkdir(parents=True, exist_ok=True)
-    for job_id, text in entries.items():
-        (root / f"{job_id}.txt").write_text(text, encoding="utf-8")
-    return root
-
-
-def _invoke(run, *args: str) -> tuple:
-    result = run("career-ops-run", *args)
-    payload = json.loads(result.stdout) if result.stdout.strip() else None
-    return result, payload
 
 
 def _queue(workspace: Path) -> dict:
@@ -49,7 +29,7 @@ def _payload_record(payload: dict, job_id: str) -> dict:
 def test_a_candidate_list_shortlists_fetches_lazily_and_applies_the_first_eligible(
     run, workspace
 ):
-    cv = _cv(workspace)
+    cv = write_cv(workspace)
     candidates = _candidates(
         workspace,
         [
@@ -79,9 +59,9 @@ def test_a_candidate_list_shortlists_fetches_lazily_and_applies_the_first_eligib
             },
         ],
     )
-    jds = _jd_dir(workspace, {"3": FRONTEND_JD, "4": FRONTEND_JD})
+    jds = write_jd_fixtures(workspace, {"3": FRONTEND_JD, "4": FRONTEND_JD})
 
-    result, payload = _invoke(
+    result, payload = invoke(
         run,
         "--candidates",
         str(candidates),
@@ -115,7 +95,7 @@ def test_a_candidate_list_shortlists_fetches_lazily_and_applies_the_first_eligib
 
 
 def test_a_second_run_does_not_reapply_a_verified_job(run, workspace):
-    cv = _cv(workspace)
+    cv = write_cv(workspace)
     candidates = _candidates(
         workspace,
         [
@@ -127,9 +107,9 @@ def test_a_second_run_does_not_reapply_a_verified_job(run, workspace):
             }
         ],
     )
-    jds = _jd_dir(workspace, {"3": FRONTEND_JD})
+    jds = write_jd_fixtures(workspace, {"3": FRONTEND_JD})
 
-    first, first_payload = _invoke(
+    first, first_payload = invoke(
         run,
         "--candidates",
         str(candidates),
@@ -142,7 +122,7 @@ def test_a_second_run_does_not_reapply_a_verified_job(run, workspace):
         "--run-id",
         "queue-first",
     )
-    second, second_payload = _invoke(
+    second, second_payload = invoke(
         run,
         "--candidates",
         str(candidates),
@@ -166,7 +146,7 @@ def test_a_second_run_does_not_reapply_a_verified_job(run, workspace):
 
 
 def test_a_missing_jd_is_recorded_and_the_flow_continues(run, workspace):
-    cv = _cv(workspace)
+    cv = write_cv(workspace)
     candidates = _candidates(
         workspace,
         [
@@ -184,9 +164,9 @@ def test_a_missing_jd_is_recorded_and_the_flow_continues(run, workspace):
             },
         ],
     )
-    jds = _jd_dir(workspace, {"2": FRONTEND_JD})
+    jds = write_jd_fixtures(workspace, {"2": FRONTEND_JD})
 
-    result, payload = _invoke(
+    result, payload = invoke(
         run,
         "--candidates",
         str(candidates),
@@ -209,7 +189,7 @@ def test_a_missing_jd_is_recorded_and_the_flow_continues(run, workspace):
 
 
 def test_an_ineligible_job_is_reported_with_its_auditable_reason(run, workspace):
-    cv = _cv(workspace)
+    cv = write_cv(workspace)
     candidates = _candidates(
         workspace,
         [
@@ -221,9 +201,9 @@ def test_an_ineligible_job_is_reported_with_its_auditable_reason(run, workspace)
             }
         ],
     )
-    jds = _jd_dir(workspace, {"1": DEVOPS_JD})
+    jds = write_jd_fixtures(workspace, {"1": DEVOPS_JD})
 
-    result, payload = _invoke(
+    result, payload = invoke(
         run,
         "--candidates",
         str(candidates),
@@ -248,7 +228,7 @@ def test_an_ineligible_job_is_reported_with_its_auditable_reason(run, workspace)
 
 
 def test_language_rule_is_auditable_through_the_cli(run, workspace):
-    cv = _cv(workspace)
+    cv = write_cv(workspace)
     (workspace / "config" / "eligibility.json").write_text(
         json.dumps({"languages": ["pt"]}), encoding="utf-8"
     )
@@ -269,9 +249,9 @@ Requirements:
             }
         ],
     )
-    jds = _jd_dir(workspace, {"1": english_jd})
+    jds = write_jd_fixtures(workspace, {"1": english_jd})
 
-    result, payload = _invoke(
+    result, payload = invoke(
         run,
         "--candidates",
         str(candidates),
@@ -294,7 +274,7 @@ Requirements:
 
 
 def test_seniority_rule_is_auditable_through_the_cli(run, workspace):
-    cv = _cv(workspace)
+    cv = write_cv(workspace)
     junior_jd = """\
 Desenvolvedor React
 
@@ -314,9 +294,9 @@ Requisitos:
             }
         ],
     )
-    jds = _jd_dir(workspace, {"1": junior_jd})
+    jds = write_jd_fixtures(workspace, {"1": junior_jd})
 
-    result, payload = _invoke(
+    result, payload = invoke(
         run,
         "--candidates",
         str(candidates),
@@ -339,7 +319,7 @@ Requisitos:
 
 
 def test_a_blocked_failed_job_returns_only_with_an_explicit_requeue_reason(run, workspace):
-    cv = _cv(workspace)
+    cv = write_cv(workspace)
     candidates = _candidates(
         workspace,
         [
@@ -351,10 +331,10 @@ def test_a_blocked_failed_job_returns_only_with_an_explicit_requeue_reason(run, 
             }
         ],
     )
-    empty_jds = _jd_dir(workspace, {}, "empty-jd-fixtures")
-    jds = _jd_dir(workspace, {"1": FRONTEND_JD}, "jd-fixtures")
+    empty_jds = write_jd_fixtures(workspace, {}, "empty-jd-fixtures")
+    jds = write_jd_fixtures(workspace, {"1": FRONTEND_JD}, "jd-fixtures")
 
-    first, first_payload = _invoke(
+    first, first_payload = invoke(
         run,
         "--candidates",
         str(candidates),
@@ -367,7 +347,7 @@ def test_a_blocked_failed_job_returns_only_with_an_explicit_requeue_reason(run, 
         "--run-id",
         "queue-no-jd",
     )
-    blocked, blocked_payload = _invoke(
+    blocked, blocked_payload = invoke(
         run,
         "--candidates",
         str(candidates),
@@ -380,7 +360,7 @@ def test_a_blocked_failed_job_returns_only_with_an_explicit_requeue_reason(run, 
         "--run-id",
         "queue-blocked",
     )
-    requeued, requeued_payload = _invoke(
+    requeued, requeued_payload = invoke(
         run,
         "--candidates",
         str(candidates),
@@ -418,9 +398,9 @@ def test_a_blocked_failed_job_returns_only_with_an_explicit_requeue_reason(run, 
 
 
 def test_a_missing_candidate_file_is_a_precondition_error(run, workspace):
-    cv = _cv(workspace)
+    cv = write_cv(workspace)
 
-    result, payload = _invoke(
+    result, payload = invoke(
         run,
         "--candidates",
         str(workspace / "data" / "missing.json"),
@@ -436,11 +416,11 @@ def test_a_missing_candidate_file_is_a_precondition_error(run, workspace):
 
 
 def test_an_invalid_candidate_file_is_a_usage_error(run, workspace):
-    cv = _cv(workspace)
+    cv = write_cv(workspace)
     path = workspace / "data" / "candidates.json"
     path.write_text('{"not": "a list"}', encoding="utf-8")
 
-    result, payload = _invoke(
+    result, payload = invoke(
         run,
         "--candidates",
         str(path),

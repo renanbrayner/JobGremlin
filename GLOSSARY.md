@@ -52,6 +52,17 @@ _Avoid_: match
 The exact PDF currently selected on the application form.
 _Avoid_: attached CV (the profile library may contain many PDFs while only one is selected)
 
+**CV cache**:
+The workspace index of generated CVs, keyed by skill fingerprint and gated by
+language, family and seniority. A hit reuses the PDF and records another origin
+job; a miss generates and indexes a new one.
+_Avoid_: CV library (that is the LinkedIn profile list)
+
+**CV decision**:
+The auditable hit/miss result for one job: score, threshold, chosen CV and the
+reason a cached CV was rejected.
+_Avoid_: match (that is the job eligibility decision)
+
 **Renderer timeout**:
 A watchdog deadline for one browser operation. When it expires before the submit
 click, the browser can be recovered and the attempt retried.
@@ -74,6 +85,8 @@ _Avoid_: submitted, successful
 - A **Job** moves through **Job states** and can be retried only while it has not
   reached a terminal verified state.
 - A **Selected CV** must match the expected PDF before the submit click.
+- A **Job** has one **CV decision**; a **CV cache** hit links the job to an
+  existing CV as an additional origin.
 - A **Submitted** application becomes **Verified** only after confirmation.
 
 ## Flagged ambiguities
