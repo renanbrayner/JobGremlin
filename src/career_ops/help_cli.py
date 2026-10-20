@@ -14,13 +14,14 @@ from typing import Sequence
 
 from career_ops.catalog import (
     CATALOG_SCHEMA_VERSION,
+    HELP_COMMAND,
     ISOLATION,
     build_catalog,
     build_epilog,
     render_text,
 )
 
-COMMAND = "career-ops-help"
+COMMAND = HELP_COMMAND
 EXIT_OK = 0
 EXIT_USAGE = 2
 

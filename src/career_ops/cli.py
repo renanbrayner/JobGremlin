@@ -161,6 +161,7 @@ OUTPUT_SCHEMA = {
             "cv_cache": {"type": "object"},
             "queue": {"type": "object"},
             "applications": {"type": "array"},
+            "parked_form_error": {"type": "string"},
         },
         "additionalProperties": True,
     },

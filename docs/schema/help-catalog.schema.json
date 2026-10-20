@@ -130,7 +130,18 @@
         "dest": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
         "required": { "type": "boolean" },
         "type": { "enum": ["string", "integer", "number", "boolean"] },
-        "action": { "type": "string", "minLength": 1 },
+        "action": {
+          "enum": [
+            "append",
+            "count",
+            "help",
+            "store",
+            "store_const",
+            "store_false",
+            "store_true",
+            "version"
+          ]
+        },
         "default": {},
         "choices": {
           "type": ["array", "null"],

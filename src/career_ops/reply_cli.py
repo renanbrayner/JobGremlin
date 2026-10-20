@@ -99,6 +99,8 @@ OUTPUT_SCHEMA = {
             "run": {"type": "object"},
             "queue": {"type": "object"},
             "parked_form_error": {"type": "string"},
+            "queue_error": {"type": "string"},
+            "run_error": {"type": "string"},
         },
         "additionalProperties": True,
     },

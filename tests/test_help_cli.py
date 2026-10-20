@@ -13,6 +13,7 @@ from conftest import (
     write_candidates,
     write_cv,
     write_jd_fixtures,
+    write_jds,
 )
 
 SCHEMA_PATH = REPO_ROOT / "docs" / "schema" / "help-catalog.schema.json"
@@ -49,6 +50,11 @@ def _check_keywords(schema: Mapping[str, object], path: str) -> None:
 def _validate(instance: object, schema: Mapping[str, object], root: Mapping[str, object], path: str = "$") -> None:
     """Validate the JSON-Schema subset used by the help catalog schema."""
     _check_keywords(schema, path)
+    definitions = schema.get("$defs")
+    if isinstance(definitions, Mapping):
+        for name, definition in definitions.items():
+            assert isinstance(definition, Mapping)
+            _check_keywords(definition, f"{path}.$defs.{name}")
     if "$ref" in schema:
         reference = str(schema["$ref"])
         assert reference.startswith("#/$defs/"), reference
@@ -202,6 +208,12 @@ def test_every_catalog_entry_documents_the_full_command_contract(run):
     assert help_options["--json"]["type"] == "boolean"
     assert help_options["--json"]["action"] == "store_true"
 
+    reply_options = {
+        option["name"]: option for option in commands["career-ops-reply"]["options"]
+    }
+    assert reply_options["--answer"]["default"] == []
+    assert reply_options["--answer"]["action"] == "append"
+
     for command in commands.values():
         options = {option["name"]: option for option in command["options"]}
         assert options["--help"]["action"] == "help"
@@ -285,3 +297,45 @@ def test_published_output_schemas_accept_real_cli_output(run, workspace):
     )
     assert report_ok.returncode == 0
     check("career-ops-report", json.loads(report_ok.stdout))
+
+
+def test_published_reply_schema_accepts_a_successful_resume(run, workspace):
+    catalog = _catalog(run)
+    commands = {command["name"]: command for command in catalog["commands"]}
+
+    waiting_result, waiting_payload = invoke(
+        run,
+        "--candidates",
+        str(write_candidates(workspace, 1)),
+        "--jd-dir",
+        str(write_jds(workspace, 1)),
+        "--cv",
+        str(write_cv(workspace)),
+        "--adapter",
+        "fake",
+        "--fake-scenario",
+        "waiting_input",
+        "--target",
+        "1",
+        "--run-id",
+        "help-reply-run",
+    )
+    assert waiting_result.returncode == 6
+    parked = waiting_payload["waiting_input"]
+
+    reply_result = run(
+        "career-ops-reply",
+        "--run-id",
+        parked["run_id"],
+        "--job",
+        parked["job"]["id"],
+        "--token",
+        parked["token"],
+        "--answer",
+        "Are you authorized to work?=Yes",
+        "--adapter",
+        "fake",
+    )
+    assert reply_result.returncode == 0
+    schema = commands["career-ops-reply"]["output"]["schema"]
+    _validate(json.loads(reply_result.stdout), schema, schema)

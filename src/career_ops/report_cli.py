@@ -49,7 +49,7 @@ EXAMPLES = (
 )
 
 OUTPUT_SCHEMA = {
-    "format": "text (default) or json (--json)",
+    "format": "text (default success) or json (--json and every error)",
     "schema": {
         "type": "object",
         "required": [

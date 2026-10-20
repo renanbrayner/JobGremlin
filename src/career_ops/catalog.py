@@ -45,9 +45,13 @@ ISOLATION: dict[str, object] = {
 
 _ACTION_NAMES = {
     "_AppendAction": "append",
+    "_CountAction": "count",
     "_HelpAction": "help",
     "_StoreAction": "store",
+    "_StoreConstAction": "store_const",
+    "_StoreFalseAction": "store_false",
     "_StoreTrueAction": "store_true",
+    "_VersionAction": "version",
 }
 
 
@@ -243,7 +247,7 @@ def _parameter(action: argparse.Action) -> Parameter:
         required=bool(action.required) if is_option else action.nargs not in ("?", "*"),
         type=_type_name(action),
         action=_ACTION_NAMES.get(type(action).__name__, "store"),
-        default=_default(action),
+        default=_json_default(action.default),
         choices=tuple(str(choice) for choice in action.choices) if action.choices else None,
         metavar=str(action.metavar) if action.metavar is not None else None,
         help=str(action.help) if action.help is not None else None,
@@ -264,12 +268,15 @@ def _type_name(action: argparse.Action) -> str:
     return getattr(action.type, "__name__", None) or "string"
 
 
-def _default(action: argparse.Action) -> object:
-    value = action.default
-    if value is argparse.SUPPRESS:
+def _json_default(value: object) -> object:
+    if value is argparse.SUPPRESS or value is None:
         return None
-    if value is None or isinstance(value, (str, int, float, bool)):
+    if isinstance(value, (str, int, float, bool)):
         return value
+    if isinstance(value, (list, tuple)):
+        return [_json_default(item) for item in value]
+    if isinstance(value, Mapping):
+        return {str(key): _json_default(item) for key, item in value.items()}
     return str(value)
 
 
