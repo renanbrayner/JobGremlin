@@ -23,6 +23,9 @@ def test_the_default_targets_cover_hermes_cron_allowlist_local_bin_and_upstream(
     }
     allowlist = next(target for target in targets if target.name == "allowlist")
     assert allowlist.paths == (home / ".hermes" / "allowlist.json",)
+    cron = next(target for target in targets if target.name == "cron")
+    assert home / ".config" / "systemd" / "user" in cron.paths
+    assert any(str(path) == "/etc/cron.d" for path in cron.paths)
     upstream = next(target for target in targets if target.name == "career_ops_upstream")
     assert upstream.paths == (paths.upstream,)
 

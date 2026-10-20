@@ -33,10 +33,6 @@ BASELINE_2026_10_19: Mapping[str, object] = {
     ),
 }
 
-_TITLE_STATE = TITLE_REJECTED_STATE
-_LOCATION_REASONS = LOCATION_REJECTION_REASONS
-_JD_MISSING = JD_MISSING_REASON
-
 _COMPARISON_ROWS: tuple[tuple[str, str], ...] = (
     ("unique_jobs", "Vagas únicas na rodada"),
     ("shortlist", "Shortlist"),
@@ -73,10 +69,10 @@ class RehearsalStep:
         jobs = _jobs(self.summary)
         candidates = _as_int(funnel.get("candidates"))
         title_rejected = sum(
-            1 for job in jobs if job.get("state") == _TITLE_STATE
+            1 for job in jobs if job.get("state") == TITLE_REJECTED_STATE
         )
         location_rejected = sum(
-            1 for job in jobs if job.get("reason") in _LOCATION_REASONS
+            1 for job in jobs if job.get("reason") in LOCATION_REJECTION_REASONS
         )
         jds_read = sum(1 for job in jobs if _read_jd(job))
         screenshots = sum(_screenshot_count(job) for job in jobs)
@@ -349,7 +345,18 @@ def _render_markdown(
             ]
         )
     else:
-        overall = "inalterado" if isolation.get("unchanged") else "ALTERADO"
+        if not isolation.get("unchanged"):
+            overall = "ALTERADO"
+        elif isolation.get("observed"):
+            overall = "inalterado (todos os alvos observados)"
+        else:
+            unobserved = isolation.get("unobserved")
+            names = (
+                ", ".join(str(name) for name in unobserved)
+                if isinstance(unobserved, list)
+                else "alguns alvos"
+            )
+            overall = f"inalterado nos alvos observados; não observado: {names}"
         lines.extend(
             [
                 f"Resultado geral: **{overall}**.",
@@ -371,6 +378,8 @@ def _render_markdown(
                 paths = ", ".join(locations) or "—"
                 if target.get("changed"):
                     status = "ALTERADO"
+                elif not target.get("observed"):
+                    status = "não observado (ausente ou comando indisponível)"
                 elif not target.get("present_before") and not target.get("present_after"):
                     status = "ausente (antes e depois), inalterado"
                 else:
@@ -413,9 +422,9 @@ def _screenshot_count(job: Mapping[str, object]) -> int:
 def _read_jd(job: Mapping[str, object]) -> bool:
     state = str(job.get("state") or "")
     reason = job.get("reason")
-    if state in {"new", _TITLE_STATE}:
+    if state in {"new", TITLE_REJECTED_STATE}:
         return False
-    if reason in _LOCATION_REASONS or reason == _JD_MISSING:
+    if reason in LOCATION_REJECTION_REASONS or reason == JD_MISSING_REASON:
         return False
     return True
 

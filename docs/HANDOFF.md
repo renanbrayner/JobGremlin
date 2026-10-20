@@ -272,19 +272,21 @@ O ensaio faz um fingerprint **antes e depois** das três rodadas e compara:
 
 - `~/.hermes`;
 - `~/.hermes/allowlist.json` (ou `HERMES_ALLOWLIST`);
-- `crontab -l` e `~/.config/systemd/user` (ou `HERMES_CRON`);
+- `crontab -l`, `~/.config/systemd/user`, `/etc/crontab`, `/etc/cron.d` e
+  `/var/spool/cron` (ou `HERMES_CRON`);
 - `~/.local/bin`;
 - o checkout configurado em `CAREER_OPS_UPSTREAM`.
 
 O resultado fica na seção “Verificação de isolamento” de
-[`docs/rehearsals/2026-10-20.md`](rehearsals/2026-10-20.md): **inalterado**.
-Alvos que não existem na máquina aparecem como “ausente (antes e depois)”,
-também sem alteração; um comando de leitura indisponível (por exemplo
-`crontab -l` ausente) é marcado como “comando indisponível”. Neste ambiente o
-checkout do career-ops e a allowlist não existem, então a prova real foi a
-ausência idêntica antes/depois. A suíte repete a prova com um `HOME` falso
-povoado, inclusive upstream, para exercitar o caminho de arquivos existentes.
-Para repetir na máquina real:
+[`docs/rehearsals/2026-10-20.md`](rehearsals/2026-10-20.md): **inalterado nos
+alvos observados**, com a lista explícita dos que não puderam ser observados.
+Neste ambiente o checkout do career-ops e a allowlist não existem, e o comando
+`crontab` não está instalado; o relatório marca esses alvos como “não
+observado” ou “ausente (antes e depois)” em vez de alegar uma prova que não
+aconteceu. As fontes de cron do sistema (`/etc/cron.d` etc.) são fingerprintadas
+quando legíveis. A suíte repete a prova com um `HOME` falso povoado, inclusive
+upstream, para exercitar o caminho de arquivos existentes. Para repetir na
+máquina real:
 
 ```bash
 # use os caminhos reais quando forem diferentes dos defaults

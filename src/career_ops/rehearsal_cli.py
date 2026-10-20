@@ -18,9 +18,9 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import shutil
 import subprocess
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Mapping, Sequence
@@ -90,7 +90,11 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def main(
+    argv: Sequence[str] | None = None,
+    *,
+    environ: Mapping[str, str] | None = None,
+) -> int:
     args = build_parser().parse_args(argv)
     date = args.date.strip()
     if not date:
@@ -108,7 +112,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
 
     try:
-        environment = load_environment(dict(os.environ))
+        environment = load_environment(environ)
         current = resolve_paths(environment)
     except ValueError as exc:
         return _fail(f"invalid workspace configuration: {exc}")
@@ -121,9 +125,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         _prepare_workspace(
             workspace_root,
             protected=(
-                _home(environment) / ".hermes",
-                _home(environment) / ".local" / "bin",
+                home / ".hermes",
+                home / ".local" / "bin",
                 current.upstream,
+            ),
+            allowed_roots=(
+                REPO_ROOT / "output" / "rehearsals",
+                Path(tempfile.gettempdir()),
             ),
         )
         run_environment = _run_environment(environment, workspace_root, current)
@@ -191,9 +199,18 @@ class RehearsalError(RuntimeError):
     """A rehearsal round did not produce the expected result."""
 
 
-def _prepare_workspace(root: Path, *, protected: Sequence[Path]) -> None:
-    if root in {Path("/"), Path.home(), REPO_ROOT}:
-        raise RehearsalError(f"refusing to replace unsafe workspace {root}")
+def _prepare_workspace(
+    root: Path,
+    *,
+    protected: Sequence[Path],
+    allowed_roots: Sequence[Path],
+) -> None:
+    if not any(root.is_relative_to(path.resolve()) for path in allowed_roots):
+        raise RehearsalError(
+            f"refusing to replace {root}: it is outside the allowed rehearsal roots"
+        )
+    if REPO_ROOT.is_relative_to(root):
+        raise RehearsalError(f"refusing to replace {root}: it contains the repo")
     for path in protected:
         resolved = path.resolve()
         if root == resolved or root.is_relative_to(resolved):

@@ -403,6 +403,11 @@
   },
   "isolation": {
     "unchanged": true,
+    "observed": false,
+    "unobserved": [
+      "allowlist",
+      "career_ops_upstream"
+    ],
     "targets": [
       {
         "name": "hermes",
@@ -413,6 +418,7 @@
         "command_status": [],
         "present_before": true,
         "present_after": true,
+        "observed": true,
         "changed": false,
         "differences": []
       },
@@ -425,13 +431,17 @@
         "command_status": [],
         "present_before": false,
         "present_after": false,
+        "observed": false,
         "changed": false,
         "differences": []
       },
       {
         "name": "cron",
         "paths": [
-          "~/.config/systemd/user"
+          "~/.config/systemd/user",
+          "/etc/crontab",
+          "/etc/cron.d",
+          "/var/spool/cron"
         ],
         "commands": [
           "crontab -l"
@@ -444,6 +454,7 @@
         ],
         "present_before": true,
         "present_after": true,
+        "observed": true,
         "changed": false,
         "differences": []
       },
@@ -456,6 +467,7 @@
         "command_status": [],
         "present_before": true,
         "present_after": true,
+        "observed": true,
         "changed": false,
         "differences": []
       },
@@ -468,6 +480,7 @@
         "command_status": [],
         "present_before": false,
         "present_after": false,
+        "observed": false,
         "changed": false,
         "differences": []
       }

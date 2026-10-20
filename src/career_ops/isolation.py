@@ -61,6 +61,12 @@ class TargetSnapshot:
     def present(self) -> bool:
         return _present(self.entries.values())
 
+    @property
+    def observed(self) -> bool:
+        return self.present or any(
+            _command_available(self, command) for command in self.commands
+        )
+
 
 @dataclass(frozen=True)
 class IsolationSnapshot:
@@ -110,12 +116,18 @@ class IsolationSnapshot:
                     "command_status": command_status,
                     "present_before": before.present if before is not None else False,
                     "present_after": after.present if after is not None else False,
+                    "observed": after.observed if after is not None else False,
                     "changed": bool(differences),
                     "differences": differences,
                 }
             )
+        unobserved = [
+            str(result["name"]) for result in results if not result["observed"]
+        ]
         return {
             "unchanged": not any(result["changed"] for result in results),
+            "observed": not unobserved,
+            "unobserved": unobserved,
             "targets": results,
         }
 
@@ -135,7 +147,14 @@ def default_targets(
         else home / ".hermes" / "allowlist.json"
     )
     cron_file = environ.get("HERMES_CRON", "").strip()
-    cron_paths = [home / ".config" / "systemd" / "user"]
+    # A user timer directory is not a cron table by itself, so also fingerprint
+    # the system cron sources when the user can read them.
+    cron_paths = [
+        home / ".config" / "systemd" / "user",
+        Path("/etc/crontab"),
+        Path("/etc/cron.d"),
+        Path("/var/spool/cron"),
+    ]
     if cron_file:
         cron_paths.append(expand_path(cron_file, environ))
     return (

@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from career_ops.rehearsal import (
     BASELINE_2026_10_19,
     RehearsalStep,
     render_rehearsal_report,
 )
+from career_ops.rehearsal_cli import RehearsalError, _prepare_workspace
 
 
 def _job(
@@ -256,3 +259,23 @@ def test_the_rehearsal_script_runs_one_three_and_twenty_jobs_and_proves_isolatio
     assert summary["verified"] == 20
     assert summary["stop_reason"] == "target_reached"
     assert summary["funnel"]["applied"] == 20
+
+
+def test_the_rehearsal_refuses_a_workspace_outside_the_allowed_roots(tmp_path):
+    with pytest.raises(RehearsalError, match="outside the allowed"):
+        _prepare_workspace(
+            tmp_path / "outside",
+            protected=(),
+            allowed_roots=(tmp_path / "allowed",),
+        )
+
+
+def test_the_rehearsal_refuses_a_workspace_that_contains_the_repo(
+    tmp_path, monkeypatch
+):
+    import career_ops.rehearsal_cli as rehearsal_cli
+
+    root = tmp_path / "repo"
+    monkeypatch.setattr(rehearsal_cli, "REPO_ROOT", root)
+    with pytest.raises(RehearsalError, match="contains the repo"):
+        _prepare_workspace(root, protected=(), allowed_roots=(tmp_path,))
