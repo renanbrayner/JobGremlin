@@ -17,7 +17,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
-from career_ops.adapter import AdapterError, ApplicationAdapter, WaitingForInput
+from career_ops.adapter import (
+    AdapterError,
+    ApplicationAdapter,
+    LinkedInDailyLimit,
+    WaitingForInput,
+)
 from career_ops.cv_cache import CvCache, CvCacheRules, CvDecision, CvSelector
 from career_ops.cv_tailoring import CommandCvTailor, CvGenerationError, CvTailor, FakeCvTailor
 from career_ops.eligibility import EligibilityRules
@@ -98,13 +103,14 @@ Output (stdout is always one JSON object):
     "status": "verified" | "failed",
     "run_id": "2026-10-19T12-00-00Z",
     "target": 20,
-    "submitted": 20,
-    "verified": 20,
+    "submitted": 22,          # submit clicks, including a click not confirmed
+    "verified": 20,           # LinkedIn confirmations; only these count
     "waiting": 0,
     "attempts": 22,
     "stop_reason": "target_reached",
     "job": {"id": "...", "title": "...", "company": "...", ...},
-    "result": {"submitted": true, "verified": true, "reason": "verified", ...},
+    "result": {"submitted": true, "verified": true, "clicked": true,
+               "reason": "verified", ...},
     "failure": null | {"reason": "...", "message": "...", "retryable": false},
     "artifacts": {"session_dir": "...", "session_json": "...", "events": "...",
                   "screenshots": ["..."]},
@@ -145,7 +151,8 @@ Exit codes:
   2  invalid command-line arguments or an invalid candidate file
   3  missing CV/answers/candidates/JD source, invalid configuration or another
      run holding data/run.lock
-  6  the run stopped with a form waiting for an answer (form left open)
+  6  the candidate queue was exhausted while a form was waiting for an answer
+     (the parked form is left open)
 
 Examples:
   career-ops-run --job 4411222 --cv output/cv-renan-react.pdf
@@ -667,7 +674,7 @@ def _loop_payload(
         "records": [record.as_dict() for record in queue.records.values()],
     }
     payload["target"] = outcome.target
-    payload["submitted"] = outcome.verified
+    payload["submitted"] = outcome.submitted
     payload["verified"] = outcome.verified
     payload["waiting"] = outcome.waiting
     payload["attempts"] = outcome.attempts
@@ -824,6 +831,20 @@ def _run_application(
             message=str(exc),
             questions=exc.questions,
         )
+    except LinkedInDailyLimit as exc:
+        session.fail(exc, job_id=job_id, detail={"reason": exc.reason})
+        return _payload(
+            session=session,
+            job=job_payload,
+            cv=cv,
+            result=SubmissionResult(
+                submitted=False,
+                attempts=0,
+                reason=exc.reason,
+                retryable=False,
+            ),
+            message=str(exc),
+        )
     except AdapterError as exc:
         session.fail(exc, job_id=job_id, detail={"reason": exc.reason})
         return _payload(
@@ -947,6 +968,7 @@ def _result_dict(result: SubmissionResult) -> dict[str, object]:
     return {
         "submitted": result.submitted,
         "verified": result.verified,
+        "clicked": result.clicked,
         "reason": result.reason,
         "attempts": result.attempts,
         "expected_cv": result.expected_cv,

@@ -213,6 +213,111 @@ def test_a_job_is_attempted_at_most_twice_per_run(run, workspace):
     assert record["attempts"] == 2
 
 
+def test_a_click_without_confirmation_is_submitted_but_never_verified(run, workspace):
+    result, payload = _invoke_daily(
+        run,
+        workspace,
+        run_id="daily-unconfirmed",
+        target=1,
+        scenario="failure",
+        count=1,
+    )
+
+    assert result.returncode == 1
+    assert payload["submitted"] == 1
+    assert payload["verified"] == 0
+    assert payload["result"]["clicked"] is True
+    assert payload["result"]["submitted"] is False
+    assert payload["stop_reason"] == "queue_exhausted"
+    assert _sessions(workspace, "daily-unconfirmed") == ["1"]
+    record = _records(workspace)["1"]
+    assert record["state"] == "failed"
+    assert record["reason"] == "not_confirmed"
+    assert _run_state(workspace, "daily-unconfirmed")["verified"] == 0
+
+
+def test_a_closed_job_is_ineligible_and_does_not_create_a_second_attempt(run, workspace):
+    result, payload = _invoke_daily(
+        run,
+        workspace,
+        run_id="daily-closed",
+        target=1,
+        scenario="job_closed",
+        count=1,
+    )
+
+    assert result.returncode == 1
+    assert payload["failure"]["reason"] == "job_closed"
+    assert payload["attempts"] == 1
+    assert _sessions(workspace, "daily-closed") == ["1"]
+    record = _records(workspace)["1"]
+    assert record["state"] == "ineligible"
+    assert record["reason"] == "job_closed"
+    assert record["attempts"] == 1
+
+
+def test_an_interrupted_attempt_is_abandoned_and_verified_jobs_are_not_reapplied(
+    run, workspace, paths
+):
+    run_id = "daily-crash"
+    queue = JobQueue.load(paths)
+    queue.ingest(
+        [
+            Candidate(
+                id="1",
+                title="Desenvolvedor React",
+                location="Recife, PE",
+                workplace="Remote",
+            ),
+            Candidate(
+                id="2",
+                title="Desenvolvedor React",
+                location="Recife, PE",
+                workplace="Remote",
+            ),
+            Candidate(
+                id="3",
+                title="Desenvolvedor React",
+                location="Recife, PE",
+                workplace="Remote",
+            ),
+        ]
+    )
+    queue.complete("1", "verified", "verified", {"run_id": run_id})
+    queue.mark("2", "eligible", None, {})
+    queue.begin("2")
+    queue.save()
+
+    state = RunState.load_or_create(paths, run_id=run_id, target=2)
+    state.verified = 1
+    state.record_job(
+        "1",
+        state="verified",
+        reason="verified",
+        attempts=1,
+        verified=True,
+        submitted=True,
+        waiting=False,
+    )
+    state.save()
+
+    result, payload = _invoke_daily(
+        run, workspace, run_id=run_id, target=2, count=3
+    )
+
+    assert result.returncode == 0
+    assert payload["verified"] == 2
+    assert payload["submitted"] == 2
+    assert _sessions(workspace, run_id) == ["3"]
+    records = _records(workspace)
+    assert records["1"]["state"] == "verified"
+    assert records["2"]["state"] == "failed"
+    assert records["2"]["reason"] == "run_interrupted"
+    assert records["2"]["attempts"] == 1
+    assert records["3"]["state"] == "verified"
+    assert _run_state(workspace, run_id)["jobs"]["2"]["reason"] == "run_interrupted"
+
+
 class _StepMonotonic:
     def __init__(self, values: Sequence[float]) -> None:
         self._values = list(values)
@@ -273,6 +378,38 @@ class _CountingSource:
         return list(self.candidates)
 
 
+class _ScriptedSource:
+    """A discovery source that answers with one batch per call, then nothing."""
+
+    def __init__(self, batches: Sequence[Sequence[Candidate]]) -> None:
+        self._batches = [list(batch) for batch in batches]
+        self.calls = 0
+
+    def discover(self) -> Sequence[Candidate]:
+        index = self.calls
+        self.calls += 1
+        return list(self._batches[index]) if index < len(self._batches) else []
+
+
+class _RejectingProcessor:
+    """Hand out seeded jobs one at a time; the injected apply rejects them."""
+
+    def __init__(self, job_ids: Sequence[str]) -> None:
+        self._job_ids = list(job_ids)
+
+    def next_eligible(self) -> Selection | None:
+        if not self._job_ids:
+            return None
+        job_id = self._job_ids.pop(0)
+        return Selection(
+            job_id=job_id,
+            candidate=Candidate(id=job_id),
+            jd_path=None,
+            profile=None,
+            decision=None,
+        )
+
+
 class _NullProcessor:
     def next_eligible(self) -> Selection | None:
         return None
@@ -317,3 +454,53 @@ def test_an_empty_backlog_triggers_one_discovery_attempt(paths):
 
     assert outcome.stop_reason == "queue_exhausted"
     assert source.calls == 1
+
+
+def _closed_application(selection: Selection, cv: Path) -> Mapping[str, object]:
+    return {
+        "status": "failed",
+        "run_id": "discovery-reopen",
+        "job": selection.as_job(),
+        "result": {
+            "submitted": False,
+            "verified": False,
+            "clicked": False,
+            "reason": "job_closed",
+            "attempts": 1,
+            "retryable": False,
+        },
+        "failure": {"reason": "job_closed", "message": "closed", "retryable": False},
+        "artifacts": {"session_dir": None},
+        "cv": str(cv),
+    }
+
+
+def _unused_cv(selection: Selection) -> tuple[Path, None]:
+    return Path("unused-cv.md"), None
+
+
+def test_discovery_reopens_after_the_backlog_shrinks(paths):
+    source = _ScriptedSource([[], [Candidate(id="late")]])
+    queue = JobQueue.load(paths)
+    queue.ingest([Candidate(id="seed")])
+    queue.mark("seed", "eligible", None, {})
+    state = RunState.load_or_create(paths, run_id="discovery-reopen", target=1)
+    loop = DailyLoop(
+        queue=queue,
+        processor=_RejectingProcessor(["seed"]),  # type: ignore[arg-type]
+        source=source,
+        config=LoopConfig(target=1, low_watermark=1),
+        state=state,
+        apply=_closed_application,
+        resolve_cv=_unused_cv,
+    )
+
+    outcome = loop.run()
+
+    assert outcome.stop_reason == "queue_exhausted"
+    # The first discovery returned nothing, but the source is consulted again
+    # once the backlog shrinks instead of staying exhausted for the whole run.
+    assert source.calls == 2
+    assert any(result.job_id == "late" for result in outcome.ingested)
+    assert queue.get("seed").state == "ineligible"
+    assert queue.get("late").state == "new"

@@ -113,6 +113,7 @@ class LoopOutcome:
     target: int
     stop_reason: str
     verified: int
+    submitted: int
     waiting: int
     attempts: int
     applications: tuple[JobOutcome, ...]
@@ -132,6 +133,7 @@ class LoopOutcome:
             "status": self.status,
             "stop_reason": self.stop_reason,
             "verified": self.verified,
+            "submitted": self.submitted,
             "waiting": self.waiting,
             "attempts": self.attempts,
             "state_path": str(self.state_path),
@@ -165,7 +167,7 @@ class DailyLoop:
         self.requeue_reason = requeue_reason
         self._monotonic = monotonic or time.monotonic
         self._source_exhausted = False
-        self._last_discovery_added = False
+        self._discovery_backlog = 0
         self._ingested: list[EnqueueResult] = []
         self._applications: list[JobOutcome] = []
         self._last_payload: Mapping[str, object] | None = None
@@ -187,10 +189,10 @@ class DailyLoop:
                 stop_reason = "time_budget_exhausted"
                 break
 
-            self._maybe_discover()
+            self._maybe_discover(force=False)
             selection = self.processor.next_eligible()
             if selection is None:
-                selection = self._discover_and_retry()
+                selection = self._recover_selection()
             if selection is None:
                 stop_reason = "queue_exhausted"
                 break
@@ -240,6 +242,7 @@ class DailyLoop:
             target=self.config.target,
             stop_reason=stop_reason,
             verified=self.state.verified,
+            submitted=self.state.clicked_count(),
             waiting=self.state.waiting_count(),
             attempts=self.state.attempts,
             applications=tuple(self._applications),
@@ -283,18 +286,27 @@ class DailyLoop:
                 waiting=False,
             )
 
-    def _maybe_discover(self) -> None:
-        if self._source_exhausted:
-            return
-        if self.queue.backlog() > self.config.low_watermark:
-            return
-        self._discover()
+    def _maybe_discover(self, *, force: bool) -> bool:
+        """Call the source when the backlog is low, or when ``force`` empties it.
 
-    def _discover_and_retry(self) -> Selection | None:
-        if self._source_exhausted or self.queue.backlog() > 0:
-            return None
+        A discovery that adds nothing is remembered, but the flag is cleared
+        once the backlog has shrunk: a source that is slow to reveal candidates
+        still gets another look after the loop made progress.
+        """
+        backlog = self.queue.backlog()
+        if self._source_exhausted:
+            if backlog >= self._discovery_backlog:
+                return False
+            self._source_exhausted = False
+        if backlog > self.config.low_watermark:
+            return False
+        if force and backlog > 0:
+            return False
         self._discover()
-        if not self._last_discovery_added:
+        return True
+
+    def _recover_selection(self) -> Selection | None:
+        if not self._maybe_discover(force=True):
             return None
         return self.processor.next_eligible()
 
@@ -303,10 +315,8 @@ class DailyLoop:
             self.source.discover(), requeue_reason=self.requeue_reason
         )
         self._ingested.extend(results)
-        self._last_discovery_added = any(
-            result.status in {"enqueued", "requeued"} for result in results
-        )
-        if not self._last_discovery_added:
+        self._discovery_backlog = self.queue.backlog()
+        if not any(result.status in {"enqueued", "requeued"} for result in results):
             self._source_exhausted = True
 
     def _budget_exhausted(self, started: float) -> bool:
@@ -372,7 +382,12 @@ class DailyLoop:
         reason = record.reason
         verified = payload.get("status") == "verified"
         waiting = reason == "waiting_input"
-        session_dir = _session_dir(payload)
+        clicked = bool(_result(payload).get("clicked"))
+        session_dir = (
+            str(record.detail["session_dir"])
+            if isinstance(record.detail.get("session_dir"), str)
+            else None
+        )
         attempts = record.attempts
         stop: str | None = None
 
@@ -385,9 +400,9 @@ class DailyLoop:
             stop = "daily_limit_reached"
         elif reason != "waiting_input" and _retryable(payload):
             if attempts < self.config.max_attempts_per_job:
-                self.queue.retry(job_id, reason)
-                state = "eligible"
-                reason = f"retry_scheduled:{reason}"
+                retried = self.queue.retry(job_id, reason)
+                state = retried.state
+                reason = retried.reason
             else:
                 state = "failed"
 
@@ -397,6 +412,7 @@ class DailyLoop:
             reason=reason,
             attempts=attempts,
             verified=verified,
+            submitted=clicked,
             waiting=waiting,
             cv=str(cv),
             session_dir=session_dir,
@@ -409,7 +425,7 @@ class DailyLoop:
                 reason=reason,
                 attempts=attempts,
                 verified=verified,
-                submitted=bool(_result(payload).get("submitted")),
+                submitted=clicked,
                 waiting=waiting,
                 cv=str(cv),
                 session_dir=session_dir,
@@ -427,6 +443,7 @@ class DailyLoop:
         reason: str | None,
         attempts: int,
         verified: bool = False,
+        submitted: bool = False,
         waiting: bool = False,
         cv: str | None = None,
         session_dir: str | None = None,
@@ -439,6 +456,7 @@ class DailyLoop:
             reason=reason,
             attempts=attempts,
             verified=verified,
+            submitted=submitted,
             waiting=waiting,
             cv=cv,
             session_dir=session_dir,
@@ -459,6 +477,7 @@ class DailyLoop:
             "result": {
                 "submitted": False,
                 "verified": False,
+                "clicked": False,
                 "reason": reason,
                 "attempts": 0,
                 "retryable": False,
@@ -484,12 +503,3 @@ def _retryable(payload: Mapping[str, object]) -> bool:
 def _result(payload: Mapping[str, object]) -> Mapping[str, object]:
     result = payload.get("result")
     return result if isinstance(result, Mapping) else {}
-
-
-def _session_dir(payload: Mapping[str, object]) -> str | None:
-    artifacts = payload.get("artifacts")
-    if isinstance(artifacts, Mapping):
-        value = artifacts.get("session_dir")
-        if isinstance(value, str) and value:
-            return value
-    return None

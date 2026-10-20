@@ -117,6 +117,7 @@ class RunState:
         attempts: int,
         verified: bool,
         waiting: bool,
+        submitted: bool = False,
         cv: str | None = None,
         session_dir: str | None = None,
     ) -> None:
@@ -125,6 +126,7 @@ class RunState:
             "reason": reason,
             "attempts": attempts,
             "verified": verified,
+            "submitted": submitted,
             "waiting": waiting,
             "cv": cv,
             "session_dir": session_dir,
@@ -139,6 +141,9 @@ class RunState:
 
     def waiting_count(self) -> int:
         return sum(1 for info in self.jobs.values() if bool(info.get("waiting")))
+
+    def clicked_count(self) -> int:
+        return sum(1 for info in self.jobs.values() if bool(info.get("submitted")))
 
     def verified_jobs(self) -> set[str]:
         return {

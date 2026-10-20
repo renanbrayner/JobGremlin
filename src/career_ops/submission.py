@@ -55,7 +55,8 @@ class SubmissionResult:
 
     ``submitted`` is the single source of truth: it is True only after the
     adapter attached the expected CV, the click happened and LinkedIn
-    confirmed it.
+    confirmed it.  ``clicked`` records the weaker fact that the submit button
+    was pressed, which the daily funnel reports separately from ``verified``.
     """
 
     submitted: bool
@@ -65,6 +66,7 @@ class SubmissionResult:
     expected_cv: str | None = None
     selected_cvs: tuple[str, ...] = ()
     artifacts: tuple[str, ...] = field(default_factory=tuple)
+    clicked: bool = False
 
     @property
     def status(self) -> Status:
@@ -177,6 +179,7 @@ class SubmissionGuard:
                         reason="verified",
                         check=check,
                         artifacts=artifacts,
+                        clicked=True,
                     )
 
                 failure = self.session.fail(
@@ -193,6 +196,7 @@ class SubmissionGuard:
                     retryable=False,
                     check=check,
                     artifacts=artifacts,
+                    clicked=True,
                 )
 
             except TimeoutError as exc:
@@ -224,6 +228,7 @@ class SubmissionGuard:
                         retryable=False,
                         selected_cvs=selected_cvs,
                         artifacts=artifacts,
+                        clicked=True,
                     )
 
                 if attempt >= self.max_attempts or self.recover is None:
@@ -280,6 +285,7 @@ def _result(
     check: CvAttachmentCheck | None = None,
     selected_cvs: tuple[str, ...] = (),
     artifacts: list[str],
+    clicked: bool = False,
 ) -> SubmissionResult:
     return SubmissionResult(
         submitted=submitted,
@@ -289,6 +295,7 @@ def _result(
         expected_cv=check.expected if check is not None else None,
         selected_cvs=check.selected if check is not None else selected_cvs,
         artifacts=tuple(dict.fromkeys(artifacts)),
+        clicked=clicked,
     )
 
 

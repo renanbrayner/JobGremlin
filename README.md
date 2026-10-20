@@ -257,11 +257,12 @@ scripts/career-ops-run --job 4411222 --cv output/cv-renan-react.pdf \
   --adapter fake --fake-scenario success
 ```
 
-O adaptador fake (`--adapter fake`) aceita cinco cenários: `success`,
+O adaptador fake (`--adapter fake`) aceita sete cenários: `success`,
 `failure` (envio sem confirmação), `wrong_cv` (PDF anterior selecionado),
-`timeout` (upload do CV congela o renderer) e `waiting_input` (formulário para
-numa pergunta e fica aberto, exit `6`). Ele executa o mesmo orquestrador e grava
-uma sessão real em `output/sessions/<run_id>/`, sem tocar no LinkedIn.
+`timeout` (upload do CV congela o renderer), `waiting_input` (formulário para
+numa pergunta e fica aberto, exit `6`), `job_closed` (vaga fechada) e
+`daily_limit` (limite diário do LinkedIn). Ele executa o mesmo orquestrador e
+grava uma sessão real em `output/sessions/<run_id>/`, sem tocar no LinkedIn.
 
 Saída (resumida):
 
@@ -271,8 +272,8 @@ Saída (resumida):
   "status": "verified",
   "run_id": "2026-10-19T12-00-00Z",
   "job": {"id": "4411222", "title": "...", "company": "...", "applied": false},
-  "result": {"submitted": true, "verified": true, "reason": "verified",
-             "attempts": 1, "expected_cv": "cv-....pdf",
+  "result": {"submitted": true, "verified": true, "clicked": true,
+             "reason": "verified", "attempts": 1, "expected_cv": "cv-....pdf",
              "selected_cvs": ["cv-....pdf"], "retryable": false},
   "failure": null,
   "artifacts": {
@@ -286,8 +287,9 @@ Saída (resumida):
 ```
 
 Exit codes: `0` verificado, `1` não verificado, `2` argumentos inválidos, `3`
-CV/answers/configuração ausente e `6` formulário aguardando resposta (a aba fica
-aberta). `--help` imprime o texto humano, o schema e os exit codes.
+CV/answers/configuração ausente (ou lock ocupado) e `6` fila esgotada com um
+formulário aguardando resposta (a aba fica aberta). `--help` imprime o texto
+humano, o schema e os exit codes.
 
 O adaptador real embrulha os scripts copiados sem alterá-los:
 
@@ -502,7 +504,9 @@ provar em teste que o tailor só rodou no miss. O tailor real fica atrás de
 `career-ops-run --candidates <arquivo> --target 20` executa o loop diário:
 processa **uma candidatura por vez**, busca candidatos sob demanda e para ao
 atingir a meta. O contador só sobe quando o `jobinfo` confirma o envio; vagas
-`waiting_input` continuam a rodada sem contar.
+`waiting_input` continuam a rodada sem contar. No JSON, `submitted` conta cliques
+de envio e `verified` conta só as confirmações do LinkedIn — apenas `verified`
+avança a meta.
 
 ```bash
 scripts/career-ops-run --candidates data/candidates.json \

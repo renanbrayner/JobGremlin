@@ -44,6 +44,7 @@ def test_a_verified_run_writes_a_complete_session_and_returns_success(run, works
     assert payload["result"] == {
         "submitted": True,
         "verified": True,
+        "clicked": True,
         "reason": "verified",
         "attempts": 1,
         "expected_cv": cv.name,
