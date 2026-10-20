@@ -99,12 +99,14 @@ class SessionRecorder:
         clock: Callable[[], datetime] | None = None,
         screenshotter: Screenshotter | None = None,
         fallback: Screenshotter | None = None,
+        subdir: str | None = None,
     ) -> "SessionRecorder":
         """Create a fresh session directory under the workspace's output.
 
         When a screenshotter is supplied, the system-level ``grim`` capture is
         wired as the automatic timeout fallback unless an explicit fallback is
-        given.
+        given.  ``subdir`` keeps one application attempt per job below a daily
+        run directory while ``run_id`` stays the same for every attempt.
         """
         clock = clock or _utcnow
         created_at = clock()
@@ -114,12 +116,17 @@ class SessionRecorder:
 
         sessions_root = paths.output / SESSION_DIRNAME
         root = sessions_root / run_id
+        if subdir is not None:
+            if not _RUN_ID_PATTERN.fullmatch(subdir):
+                raise ValueError(f"invalid session subdirectory {subdir!r}")
+            root = root / subdir
         if root.exists():
             suffix = 2
-            while (sessions_root / f"{run_id}-{suffix}").exists():
+            while Path(f"{root}-{suffix}").exists():
                 suffix += 1
-            run_id = f"{run_id}-{suffix}"
-            root = sessions_root / run_id
+            root = Path(f"{root}-{suffix}")
+            if subdir is None:
+                run_id = root.name
 
         paths.assert_writable(root)
         (root / "screenshots").mkdir(parents=True)

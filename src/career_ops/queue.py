@@ -41,6 +41,9 @@ _BLOCKING_STATES = frozenset(
 # States that can still be retried safely without an explicit requeue.
 _RESUMABLE_STATES = frozenset({"new", "jd_fetched"})
 
+# Reasons that mean the job itself cannot be applied to (not a transient error).
+BLOCKER_REASONS = frozenset({"already_applied", "job_closed", "no_easy_apply"})
+
 _EVENT_BY_STATE = {
     "title_rejected": "rejected",
     "ineligible": "rejected",
@@ -367,6 +370,22 @@ class JobQueue:
             if record.state in _RESUMABLE_STATES
         ]
 
+    def backlog(self) -> int:
+        """Records that still need work: ``new``, ``jd_fetched`` or ``eligible``."""
+        return sum(
+            1
+            for record in self.records.values()
+            if record.state in _RESUMABLE_STATES or record.state == "eligible"
+        )
+
+    def verified_for_run(self, run_id: str) -> list[str]:
+        """Ids this run already confirmed, used to resume without double counting."""
+        return [
+            job_id
+            for job_id, record in self.records.items()
+            if record.state == "verified" and record.detail.get("run_id") == run_id
+        ]
+
     def first_eligible(self) -> StoredJob | None:
         return next(
             (record for record in self.records.values() if record.state == "eligible"),
@@ -430,6 +449,20 @@ class JobQueue:
     ) -> StoredJob:
         """Record the outcome of an application attempt."""
         return self.mark(job_id, state, reason, detail)
+
+    def retry(self, job_id: str, reason: str | None) -> StoredJob:
+        """Put a job that failed transiently back in the eligible slot.
+
+        Attempts are kept: the daily loop uses them to enforce its per-job
+        retry limit, so a retry can never restart the count.
+        """
+        record = self.get(job_id)
+        return self.mark(
+            job_id,
+            "eligible",
+            f"retry_scheduled:{reason}" if reason else "retry_scheduled",
+            {"previous_reason": reason, "attempts": record.attempts},
+        )
 
     def store_jd(self, job_id: str, text: str) -> Path:
         path = self.jds_dir / f"{job_id}.txt"
@@ -666,3 +699,37 @@ def _as_bool(value: object) -> bool:
 
 def _optional_str(value: object) -> str | None:
     return None if value is None else str(value)
+
+
+def record_application_outcome(
+    queue: JobQueue,
+    job_id: str,
+    payload: Mapping[str, object],
+) -> StoredJob:
+    """Map a ``career-ops-run`` job payload onto the queue state machine."""
+    failure = payload.get("failure")
+    reason = failure.get("reason") if isinstance(failure, Mapping) else None
+    if not isinstance(reason, str):
+        result = payload.get("result")
+        reason = str(result.get("reason")) if isinstance(result, Mapping) else "unknown"
+
+    if payload.get("status") == "verified":
+        state = "verified"
+    elif reason == "waiting_input":
+        state = "waiting_input"
+    elif reason in BLOCKER_REASONS:
+        state = "ineligible"
+    else:
+        state = "failed"
+
+    detail: dict[str, object] = {"run_id": payload.get("run_id"), "reason": reason}
+    artifacts = payload.get("artifacts")
+    if isinstance(artifacts, Mapping) and artifacts.get("session_dir") is not None:
+        detail["session_dir"] = artifacts["session_dir"]
+    cv = payload.get("cv")
+    if isinstance(cv, str) and cv:
+        detail["cv"] = cv
+    cv_cache = payload.get("cv_cache")
+    if isinstance(cv_cache, Mapping):
+        detail["cv_cache"] = dict(cv_cache)
+    return queue.complete(job_id, state, reason, detail)

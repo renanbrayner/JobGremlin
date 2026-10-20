@@ -30,6 +30,7 @@ from career_ops.adapter import (
     AdapterUnavailable,
     ApplicationFailed,
     JobInfo,
+    LinkedInDailyLimit,
     WaitingForInput,
 )
 from career_ops.capture import cdp_screenshotter
@@ -185,6 +186,7 @@ class RealApplicationAdapter:
             timeout=self.apply_timeout,
         )
         _raise_if_waiting(output)
+        _raise_if_daily_limit(output)
         if output.returncode != 0:
             raise ApplicationFailed(
                 f"easyapply exited {output.returncode} while filling the form: "
@@ -224,6 +226,7 @@ class RealApplicationAdapter:
             timeout=self.apply_timeout,
         )
         _raise_if_waiting(output)
+        _raise_if_daily_limit(output)
         # Exit 1 means the submit click happened but the script did not see the
         # confirmation text.  The guard verifies through jobinfo next, so this is
         # not a failure yet.
@@ -369,6 +372,22 @@ def _tail(text: str, limit: int = 400) -> str:
 def _raise_if_waiting(output: CommandOutput) -> None:
     if output.returncode == 6 or "FORMULARIO EM ESPERA" in output.stdout:
         raise WaitingForInput(_pending_questions(output.stdout))
+
+
+_DAILY_LIMIT_MARKERS = (
+    "daily limit",
+    "limite diário",
+    "limite diario",
+    "reached the limit",
+    "atingiu o limite",
+    "try again tomorrow",
+)
+
+
+def _raise_if_daily_limit(output: CommandOutput) -> None:
+    text = f"{output.stdout}\n{output.stderr}".lower()
+    if any(marker in text for marker in _DAILY_LIMIT_MARKERS):
+        raise LinkedInDailyLimit()
 
 
 def _pending_questions(stdout: str) -> tuple[str, ...]:

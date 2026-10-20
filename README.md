@@ -64,6 +64,9 @@ Os caminhos podem ser definidos por variáveis de ambiente ou por um arquivo
 | `CAREER_OPS_RENDERER_TIMEOUT_SECONDS` | `30` | prazo rígido por operação do navegador |
 | `CAREER_OPS_APPLY_TIMEOUT_SECONDS` | `420` | prazo de um `easyapply` completo por vaga |
 | `CAREER_OPS_CV_MIN_SCORE` | `0.90` | similaridade mínima para reutilizar um CV do cache |
+| `CAREER_OPS_RUN_MAX_SECONDS` | `14400` | orçamento de tempo do loop diário (`0` desliga) |
+| `CAREER_OPS_MAX_ATTEMPTS_PER_JOB` | `2` | tentativas por vaga em uma rodada |
+| `CAREER_OPS_QUEUE_LOW_WATERMARK` | `5` | backlog que dispara uma nova descoberta |
 | `CAREER_OPS_ENV_FILE` | `$CAREER_OPS_CONFIG/career-ops.env` | arquivo de override |
 
 Configurações pessoais (por exemplo `config/profile.yml`,
@@ -494,6 +497,55 @@ provar em teste que o tailor só rodou no miss. O tailor real fica atrás de
 `career_ops.cv_tailoring.CommandCvTailor` e escreve em um staging root sob
 `data/cv-cache/work/`, sem tocar no checkout upstream.
 
+## Loop diário até 20 verificadas
+
+`career-ops-run --candidates <arquivo> --target 20` executa o loop diário:
+processa **uma candidatura por vez**, busca candidatos sob demanda e para ao
+atingir a meta. O contador só sobe quando o `jobinfo` confirma o envio; vagas
+`waiting_input` continuam a rodada sem contar.
+
+```bash
+scripts/career-ops-run --candidates data/candidates.json \
+  --jd-dir data/jd-fixtures --cv output/cv-renan-react.pdf \
+  --adapter fake --target 20 --max-seconds 14400 \
+  --run-id daily-2026-10-20
+```
+
+Regras de parada, todas reportadas em `stop_reason`:
+
+- `target_reached` — exatamente a meta de envios verificados; o loop checa o
+  contador **antes** de abrir a próxima vaga, então uma 21ª tentativa não
+  começa;
+- `time_budget_exhausted` — o orçamento de `--max-seconds`
+  (`CAREER_OPS_RUN_MAX_SECONDS`, padrão 4h) acabou antes da próxima vaga;
+- `daily_limit_reached` — o adaptador reportou o limite diário do LinkedIn
+  (`LinkedInDailyLimit`);
+- `queue_exhausted` — a fonte de candidatos não tem mais nada e a fila acabou;
+- `run_locked` — outra rodada já segura `data/run.lock`.
+
+Cada vaga tem no máximo `--max-attempts` tentativas por rodada
+(`CAREER_OPS_MAX_ATTEMPTS_PER_JOB`, padrão 2). Uma falha transitória
+(`renderer_timeout`, por exemplo) volta para `eligible` enquanto houver
+tentativa disponível; a contagem fica no registro da fila e nunca reinicia.
+
+A descoberta é preguiçosa: a fonte de candidatos só é chamada quando o backlog
+(`new` + `jd_fetched` + `eligible`) cai para `--queue-low-watermark`
+(`CAREER_OPS_QUEUE_LOW_WATERMARK`, padrão 5) ou menos. A mesma lista pode ser
+relida a cada rodada sem duplicar, porque a fila deduplica por `id`.
+
+O progresso diário fica em `data/runs/<run_id>.json` (meta, status, contador de
+verificadas e resultado por vaga). Retomar a mesma rodada com o mesmo
+`--run-id` continua de onde parou, sem reaplicar vagas `verified`; uma tentativa
+que ficou em `applying` quando o processo morreu vira `failed` com
+`run_interrupted` e não é repetida automaticamente, porque o clique pode já ter
+acontecido. `data/run.lock` é um `flock` não bloqueante: enquanto uma rodada
+está ativa, a segunda recebe exit `3` com `failure.reason = "run_locked"` e não
+cria sessão.
+
+Cada tentativa grava uma sessão própria em
+`output/sessions/<run_id>/<job-id>/` (a segunda tentativa da mesma vaga vira
+`<job-id>-2/`), com `run_id` igual em todos os eventos da rodada.
+
 ## Navegador em paralelo
 
 Por padrão os scripts usam o mesmo perfil e a mesma porta CDP do sistema atual
@@ -507,11 +559,10 @@ CDP_PORT=9334 scripts/career-ops-browser
 
 ## Limitações conhecidas deste slice
 
-- `career-ops-run` já aplica **uma** vaga explícita ou a primeira vaga elegível
-  de uma lista persistente, com cache/geração de CV no modo fila. O loop diário
-  com meta de 20, `career-ops-reply`, `career-ops-status`,
-  `career-ops-report` e `career-ops-help --json` ainda são construídos nos
-  próximos tickets.
+- `career-ops-run` já aplica uma vaga explícita ou executa o loop diário sobre
+  uma lista persistente, com cache/geração de CV, lock, retomada e meta
+  verificada. `career-ops-reply`, `career-ops-status`, `career-ops-report` e
+  `career-ops-help --json` ainda são construídos nos próximos tickets.
 - O build de CV delega aos helpers do upstream (`openai-tailor.mjs` e
   `generate-pdf.mjs`), copiando `cv.md`/`config/profile.yml` para um staging root
   do workspace. O tailor real é validado por testes com runner injetado e pelo

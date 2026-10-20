@@ -54,6 +54,15 @@ class WaitingForInput(AdapterError):
         super().__init__(f"application is waiting for an answer{detail}")
 
 
+class LinkedInDailyLimit(AdapterError):
+    """LinkedIn reported that the account reached its daily application limit."""
+
+    reason = "daily_limit"
+
+    def __init__(self, message: str = "LinkedIn reported its daily application limit") -> None:
+        super().__init__(message)
+
+
 @dataclass(frozen=True)
 class JobInfo:
     """What opening a job page tells the runner before any form is touched."""

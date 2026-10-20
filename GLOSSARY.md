@@ -20,6 +20,17 @@ _Avoid_: old system, legacy checkout
 One invocation of the daily flow, identified by `run_id`.
 _Avoid_: batch, round
 
+**Run state**:
+The persisted counters for one **Run**: `data/runs/<run_id>.json`, with the
+target, verified count and the outcome per job. Resuming reads it so confirmed
+applications are never reapplied or counted twice.
+_Avoid_: checkpoint (the queue still owns each job's state)
+
+**Stop reason**:
+Why the daily loop ended: `target_reached`, `queue_exhausted`,
+`time_budget_exhausted`, `daily_limit_reached` or `run_locked`.
+_Avoid_: error (a stop is not always a failure)
+
 **Session**:
 The observable record of one application attempt: `session.json`,
 `events.jsonl` and screenshots under `output/sessions/<run_id>/`.

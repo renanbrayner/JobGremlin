@@ -12,8 +12,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
+from datetime import datetime
 from pathlib import Path
-from typing import Mapping, Sequence
+from typing import Callable, Mapping, Sequence
 
 from career_ops.adapter import AdapterError, ApplicationAdapter, WaitingForInput
 from career_ops.cv_cache import CvCache, CvCacheRules, CvDecision, CvSelector
@@ -26,9 +28,9 @@ from career_ops.job_description import (
     JobDescriptionFetcher,
 )
 from career_ops.job_profile import JobProfile
+from career_ops.loop import DailyLoop, FileCandidateSource, LoopConfig, LoopOutcome
 from career_ops.paths import WorkspacePaths, expand_path, load_environment, resolve_paths
 from career_ops.queue import (
-    EnqueueResult,
     JobQueue,
     QueueProcessor,
     Selection,
@@ -40,6 +42,8 @@ from career_ops.real_adapter import (
     RealApplicationAdapter,
 )
 from career_ops.renderer import RendererWatchdog, resolve_renderer_timeout
+from career_ops.run_lock import LOCK_FILENAME, RunLock, RunLocked
+from career_ops.run_state import RunState, utcnow, validate_run_id
 from career_ops.session import SessionRecorder
 from career_ops.submission import SubmissionGuard, SubmissionResult
 
@@ -49,6 +53,11 @@ EXIT_FAILED = 1
 EXIT_USAGE = 2
 EXIT_PRECONDITION = 3
 EXIT_WAITING_INPUT = 6
+
+DEFAULT_TARGET = 1
+DEFAULT_RUN_MAX_SECONDS = 4 * 60 * 60
+DEFAULT_MAX_ATTEMPTS_PER_JOB = 2
+DEFAULT_QUEUE_LOW_WATERMARK = 5
 
 _BLOCKER_MESSAGES = {
     "already_applied": "LinkedIn already shows an application for this job",
@@ -60,24 +69,49 @@ _HELP_EPILOG = """\
 Two modes:
   --job <id>          apply to one explicit job (the original one-job slice)
   --candidates <file> ingest a JSON/TSV candidate list, shortlist it, fetch the
-                      JD lazily, apply the first eligible job and persist the
-                      queue in data/queue.json. Without --cv, the job profile
-                      reuses a compatible CV from data/cv-cache/ or generates
-                      and indexes a new one.
+                      JD lazily, apply eligible jobs and persist the queue in
+                      data/queue.json. Without --cv, each job profile reuses a
+                      compatible CV from data/cv-cache/ or generates and
+                      indexes a new one.
+
+Daily loop (with --candidates):
+  --target N          stop exactly after N verified applications (default: 1)
+  --max-seconds S     stop before the next attempt after S seconds (0 disables;
+                      default: 4h or $CAREER_OPS_RUN_MAX_SECONDS)
+  --max-attempts N    attempts per job in one run (default: 2)
+  --queue-low-watermark N
+                      only call discovery when the backlog is at or below N
+                      (default: 5)
   --requeue-reason    with --candidates, explicitly allow blocked ids to return
                       to `new` (recorded in the queue history)
+
+The loop is sequential: one application at a time. It counts only applications
+confirmed by LinkedIn, stops before opening a 21st job, resumes with the same
+--run-id without reapplying verified jobs, and holds data/run.lock so two
+rounds cannot run at once. Progress is persisted in
+data/runs/<run_id>.json; each attempt is a session below
+output/sessions/<run_id>/<job-id>/.
 
 Output (stdout is always one JSON object):
   {
     "command": "career-ops-run",
     "status": "verified" | "failed",
     "run_id": "2026-10-19T12-00-00Z",
+    "target": 20,
+    "submitted": 20,
+    "verified": 20,
+    "waiting": 0,
+    "attempts": 22,
+    "stop_reason": "target_reached",
     "job": {"id": "...", "title": "...", "company": "...", ...},
     "result": {"submitted": true, "verified": true, "reason": "verified", ...},
     "failure": null | {"reason": "...", "message": "...", "retryable": false},
     "artifacts": {"session_dir": "...", "session_json": "...", "events": "...",
                   "screenshots": ["..."]},
     "cv": "/abs/path/cv-....pdf",
+    "run": {"status": "...", "stop_reason": "...", "attempts": 2,
+            "verified": 20, "waiting": 0, "state_path": "...",
+            "applications": [{"id": "...", "state": "verified", ...}]},
     "cv_cache": {                      # queue mode without --cv
       "hit": true, "reason": "cache_hit" | "cache_miss",
       "miss_reason": null | "language_mismatch" | "family_incompatible"
@@ -95,6 +129,9 @@ Output (stdout is always one JSON object):
     }
   }
 
+Stop reasons: target_reached, queue_exhausted, time_budget_exhausted,
+daily_limit_reached, run_locked.
+
 The CV cache is gated by language, family, seniority, must-have skills and a
 weighted skill score (required skills weigh three times preferred skills). The
 threshold defaults to 0.90 and can be set in config/cv-cache.json,
@@ -102,12 +139,13 @@ CAREER_OPS_CV_MIN_SCORE or --cv-min-score. The upstream openai-tailor runs only
 on a cache miss; a CV containing the company name is rejected.
 
 Exit codes:
-  0  LinkedIn confirmed the application (status "verified")
-  1  the application was not verified (status "failed"), including when the
-     candidate list has no eligible job or CV generation failed
+  0  LinkedIn confirmed the application (the verified target was reached)
+  1  the target was not reached (queue exhausted, time budget, daily limit or
+     the last application failed), including when no candidate was eligible
   2  invalid command-line arguments or an invalid candidate file
-  3  missing CV/answers/candidates/JD source or invalid configuration
-  6  the form is waiting for an answer (form left open)
+  3  missing CV/answers/candidates/JD source, invalid configuration or another
+     run holding data/run.lock
+  6  the run stopped with a form waiting for an answer (form left open)
 
 Examples:
   career-ops-run --job 4411222 --cv output/cv-renan-react.pdf
@@ -116,7 +154,7 @@ Examples:
   career-ops-run --candidates data/candidates.json --jd-dir data/jd-fixtures \\
     --adapter fake --run-id queue-demo
   career-ops-run --candidates data/candidates.json --jd-dir data/jd-fixtures \\
-    --adapter fake --cv-min-score 0.95
+    --adapter fake --target 20 --max-seconds 14400 --run-id daily-2026-10-20
   career-ops-run --candidates data/candidates.json --requeue-reason "jd now available"
   career-ops-run --help
 
@@ -160,6 +198,39 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "explicitly allow blocked ids in --candidates mode to return to the "
             "queue; the reason is recorded in the queue history"
+        ),
+    )
+    parser.add_argument(
+        "--target",
+        type=int,
+        default=DEFAULT_TARGET,
+        help=(
+            "stop after this many verified applications in --candidates mode "
+            "(default: 1; use 20 for the daily run)"
+        ),
+    )
+    parser.add_argument(
+        "--max-seconds",
+        type=float,
+        help=(
+            "time budget for the whole --candidates run in seconds; 0 disables "
+            "it (default: 4h or $CAREER_OPS_RUN_MAX_SECONDS)"
+        ),
+    )
+    parser.add_argument(
+        "--max-attempts",
+        type=int,
+        help=(
+            "attempts per job in one run (default: 2 or "
+            "$CAREER_OPS_MAX_ATTEMPTS_PER_JOB)"
+        ),
+    )
+    parser.add_argument(
+        "--queue-low-watermark",
+        type=int,
+        help=(
+            "run discovery only when the backlog is at or below this number "
+            "(default: 5 or $CAREER_OPS_QUEUE_LOW_WATERMARK)"
         ),
     )
     parser.add_argument(
@@ -207,6 +278,8 @@ def main(
     argv: Sequence[str] | None = None,
     *,
     environ: Mapping[str, str] | None = None,
+    clock: Callable[[], datetime] | None = None,
+    monotonic: Callable[[], float] | None = None,
 ) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -220,6 +293,25 @@ def main(
         parser.error("--jd-dir requires --candidates")
     if args.requeue_reason and not args.candidates:
         parser.error("--requeue-reason requires --candidates")
+    if args.target < 1:
+        parser.error("--target must be at least 1")
+    if args.target != DEFAULT_TARGET and not args.candidates:
+        parser.error("--target requires --candidates")
+    if args.max_seconds is not None:
+        if args.max_seconds < 0:
+            parser.error("--max-seconds must be zero or greater")
+        if not args.candidates:
+            parser.error("--max-seconds requires --candidates")
+    if args.max_attempts is not None:
+        if args.max_attempts < 1:
+            parser.error("--max-attempts must be at least 1")
+        if not args.candidates:
+            parser.error("--max-attempts requires --candidates")
+    if args.queue_low_watermark is not None:
+        if args.queue_low_watermark < 0:
+            parser.error("--queue-low-watermark must be zero or greater")
+        if not args.candidates:
+            parser.error("--queue-low-watermark requires --candidates")
     if args.cv_min_score is not None:
         if not 0 < args.cv_min_score <= 1:
             parser.error("--cv-min-score must be between 0 and 1")
@@ -231,6 +323,8 @@ def main(
         if not job_id:
             parser.error("--job must not be empty")
 
+    clock = clock or utcnow
+    monotonic = monotonic or time.monotonic
     environment = load_environment(environ)
     try:
         paths = resolve_paths(environment)
@@ -240,6 +334,9 @@ def main(
             DEFAULT_APPLY_TIMEOUT_SECONDS,
             "CAREER_OPS_APPLY_TIMEOUT_SECONDS",
         )
+        max_seconds = _run_max_seconds(args.max_seconds, environment)
+        max_attempts = _run_max_attempts(args.max_attempts, environment)
+        low_watermark = _run_low_watermark(args.queue_low_watermark, environment)
     except ValueError as exc:
         return _emit(
             _error_payload(
@@ -298,6 +395,11 @@ def main(
             answers=answers,
             apply_timeout=apply_timeout,
             renderer_timeout=renderer_timeout,
+            max_seconds=max_seconds,
+            max_attempts=max_attempts,
+            low_watermark=low_watermark,
+            clock=clock,
+            monotonic=monotonic,
         )
 
     assert cv is not None  # --job mode always resolves a CV or fails above
@@ -314,11 +416,30 @@ def main(
     watchdog = _build_watchdog(args.adapter, renderer_timeout, apply_timeout)
 
     try:
-        session = SessionRecorder.create(
-            paths,
-            run_id=args.run_id,
-            job={"id": job_id},
-            screenshotter=adapter.capture,
+        with RunLock(
+            paths.data / LOCK_FILENAME,
+            assert_writable=paths.assert_writable,
+            clock=clock,
+        ):
+            session = SessionRecorder.create(
+                paths,
+                run_id=args.run_id,
+                job={"id": job_id},
+                screenshotter=adapter.capture,
+                clock=clock,
+            )
+
+            payload = _run_application(
+                session=session,
+                adapter=adapter,
+                watchdog=watchdog,
+                job_id=job_id,
+                cv=cv,
+            )
+    except RunLocked as exc:
+        return _emit(
+            _error_payload(job_id=job_id, reason="run_locked", message=str(exc), cv=cv),
+            EXIT_PRECONDITION,
         )
     except ValueError as exc:
         reason = "invalid_run_id" if "run id" in str(exc) else "configuration_error"
@@ -326,14 +447,6 @@ def main(
             _error_payload(job_id=job_id, reason=reason, message=str(exc), cv=cv),
             EXIT_USAGE if reason == "invalid_run_id" else EXIT_PRECONDITION,
         )
-
-    payload = _run_application(
-        session=session,
-        adapter=adapter,
-        watchdog=watchdog,
-        job_id=job_id,
-        cv=cv,
-    )
     return _emit(payload, _exit_code(payload))
 
 
@@ -346,6 +459,11 @@ def _run_queue(
     answers: Path | None,
     apply_timeout: float,
     renderer_timeout: float,
+    max_seconds: float | None,
+    max_attempts: int,
+    low_watermark: int,
+    clock: Callable[[], datetime],
+    monotonic: Callable[[], float],
 ) -> int:
     candidates_path = expand_path(args.candidates, environment)
     if not candidates_path.is_file():
@@ -390,7 +508,7 @@ def _run_queue(
         )
 
     try:
-        candidates = load_candidates(candidates_path)
+        load_candidates(candidates_path)
     except ValueError as exc:
         return _emit(
             _error_payload(
@@ -402,8 +520,100 @@ def _run_queue(
             EXIT_USAGE,
         )
 
+    run_id = args.run_id or clock().strftime("%Y%m%dT%H%M%SZ")
     try:
+        validate_run_id(run_id)
+        state = RunState.load_or_create(
+            paths,
+            run_id=run_id,
+            target=args.target,
+            clock=clock,
+            assert_writable=paths.assert_writable,
+        )
         queue = JobQueue.load(paths)
+        config = LoopConfig(
+            target=args.target,
+            max_seconds=max_seconds,
+            max_attempts_per_job=max_attempts,
+            low_watermark=low_watermark,
+        )
+    except ValueError as exc:
+        reason = "invalid_run_id" if "run id" in str(exc) else "configuration_error"
+        return _emit(
+            _error_payload(job_id=None, reason=reason, message=str(exc), cv=cv),
+            EXIT_USAGE if reason == "invalid_run_id" else EXIT_PRECONDITION,
+        )
+
+    decisions: dict[str, CvDecision] = {}
+
+    def resolve_cv(selection: Selection) -> tuple[Path, CvDecision | None]:
+        if cv is not None:
+            return cv, None
+        decision = _select_cached_cv(
+            args,
+            environment=environment,
+            paths=paths,
+            selection=selection,
+        )
+        decisions[selection.job_id] = decision
+        return decision.cv, decision
+
+    def apply(selection: Selection, expected_cv: Path) -> Mapping[str, object]:
+        adapter = _build_adapter(
+            args.adapter,
+            args.fake_scenario,
+            paths,
+            environment,
+            job_id=selection.job_id,
+            cv=expected_cv,
+            answers=answers,
+            apply_timeout=apply_timeout,
+        )
+        watchdog = _build_watchdog(args.adapter, renderer_timeout, apply_timeout)
+        session = SessionRecorder.create(
+            paths,
+            run_id=run_id,
+            job=selection.as_job(),
+            screenshotter=adapter.capture,
+            clock=clock,
+            subdir=selection.job_id,
+        )
+        payload = _run_application(
+            session=session,
+            adapter=adapter,
+            watchdog=watchdog,
+            job_id=selection.job_id,
+            cv=expected_cv,
+            initial_job=selection.as_job(),
+        )
+        decision = decisions.get(selection.job_id)
+        if decision is not None:
+            payload["cv_cache"] = decision.as_dict()
+        return payload
+
+    try:
+        with RunLock(
+            paths.data / LOCK_FILENAME,
+            assert_writable=paths.assert_writable,
+            clock=clock,
+        ):
+            loop = DailyLoop(
+                queue=queue,
+                processor=QueueProcessor(queue, fetcher, rules=rules),
+                source=FileCandidateSource(candidates_path),
+                config=config,
+                state=state,
+                apply=apply,
+                resolve_cv=resolve_cv,
+                requeue_reason=args.requeue_reason,
+                monotonic=monotonic,
+            )
+            outcome = loop.run()
+    except RunLocked as exc:
+        payload = _error_payload(job_id=None, reason="run_locked", message=str(exc), cv=cv)
+        payload["target"] = args.target
+        payload["stop_reason"] = "run_locked"
+        return _emit(payload, EXIT_PRECONDITION)
     except ValueError as exc:
         return _emit(
             _error_payload(
@@ -415,98 +625,107 @@ def _run_queue(
             EXIT_PRECONDITION,
         )
 
-    ingested = queue.ingest(candidates, requeue_reason=args.requeue_reason)
-    selection = QueueProcessor(queue, fetcher, rules=rules).next_eligible()
-    if selection is None:
-        payload = _queue_empty_payload(queue=queue, ingested=ingested, cv=cv)
-        return _emit(payload, EXIT_FAILED)
-
-    initial_job = selection.as_job()
-    cv_decision: CvDecision | None = None
-    if cv is None:
-        try:
-            cv_decision = _select_cached_cv(
-                args,
-                environment=environment,
-                paths=paths,
-                selection=selection,
-            )
-        except CvGenerationError as exc:
-            queue.complete(
-                selection.job_id,
-                "failed",
-                exc.reason,
-                {
-                    "message": str(exc),
-                    "stage": "cv",
-                    "retryable": exc.retryable,
-                },
-            )
-            payload = _error_payload(
-                job_id=selection.job_id,
-                reason=exc.reason,
-                message=str(exc),
-                retryable=exc.retryable,
-            )
-            payload["queue"] = _queue_payload(queue, selection, ingested)
-            return _emit(payload, EXIT_FAILED)
-        except ValueError as exc:
-            # A malformed cache/index is a workspace configuration error, not a
-            # property of this job: keep it eligible for a run after the fix.
-            payload = _error_payload(
-                job_id=selection.job_id,
-                reason="configuration_error",
-                message=str(exc),
-            )
-            payload["queue"] = _queue_payload(queue, selection, ingested)
-            return _emit(payload, EXIT_PRECONDITION)
-        cv = cv_decision.cv
-
-    adapter = _build_adapter(
-        args.adapter,
-        args.fake_scenario,
-        paths,
-        environment,
-        job_id=selection.job_id,
+    payload = _loop_payload(
+        outcome,
+        queue=queue,
         cv=cv,
-        answers=answers,
-        apply_timeout=apply_timeout,
     )
-    watchdog = _build_watchdog(args.adapter, renderer_timeout, apply_timeout)
+    return _emit(payload, _loop_exit_code(outcome))
 
-    try:
-        session = SessionRecorder.create(
-            paths,
-            run_id=args.run_id,
-            job=initial_job,
-            screenshotter=adapter.capture,
+
+def _loop_payload(
+    outcome: LoopOutcome,
+    *,
+    queue: JobQueue,
+    cv: Path | None,
+) -> dict[str, object]:
+    if outcome.last_payload is not None:
+        payload = dict(outcome.last_payload)
+    else:
+        reason = (
+            "no_eligible_job"
+            if outcome.stop_reason == "queue_exhausted"
+            else outcome.stop_reason
         )
-    except ValueError as exc:
-        reason = "invalid_run_id" if "run id" in str(exc) else "configuration_error"
-        return _emit(
-            _error_payload(
-                job_id=selection.job_id,
-                reason=reason,
-                message=str(exc),
-                cv=cv,
-            ),
-            EXIT_USAGE if reason == "invalid_run_id" else EXIT_PRECONDITION,
+        payload = _envelope(
+            run_id=outcome.run_id,
+            job={"id": None},
+            cv=cv,
+            result=SubmissionResult(submitted=False, attempts=0, reason=reason),
+            message=_stop_message(outcome.stop_reason),
+            artifacts=_empty_artifacts(),
         )
 
-    queue.begin(selection.job_id)
-    payload = _run_application(
-        session=session,
-        adapter=adapter,
-        watchdog=watchdog,
-        job_id=selection.job_id,
-        cv=cv,
-        initial_job=initial_job,
-    )
-    if cv_decision is not None:
-        payload["cv_cache"] = cv_decision.as_dict()
-    _record_queue_outcome(queue, selection.job_id, payload)
-    payload["queue"] = _queue_payload(queue, selection, ingested)
-    return _emit(payload, _exit_code(payload))
+    selection = outcome.last_selection
+    payload["queue"] = {
+        "path": str(queue.path),
+        "selection": selection.as_dict() if selection is not None else None,
+        "ingested": [result.as_dict() for result in outcome.ingested],
+        "record": (
+            queue.get(selection.job_id).as_dict() if selection is not None else None
+        ),
+        "records": [record.as_dict() for record in queue.records.values()],
+    }
+    payload["target"] = outcome.target
+    payload["submitted"] = outcome.verified
+    payload["verified"] = outcome.verified
+    payload["waiting"] = outcome.waiting
+    payload["attempts"] = outcome.attempts
+    payload["stop_reason"] = outcome.stop_reason
+    payload["run"] = outcome.as_dict()
+    payload["applications"] = [
+        application.as_dict() for application in outcome.applications
+    ]
+
+    if outcome.stop_reason == "target_reached":
+        payload["status"] = "verified"
+        payload["failure"] = None
+    else:
+        payload["status"] = "failed"
+        last_failure = payload.get("failure")
+        last_verified = (
+            outcome.last_payload is not None
+            and outcome.last_payload.get("status") == "verified"
+        )
+        if last_verified and outcome.stop_reason != "daily_limit_reached":
+            payload["failure"] = {
+                "reason": outcome.stop_reason,
+                "message": _stop_message(outcome.stop_reason),
+                "retryable": True,
+            }
+        elif last_verified:
+            payload["failure"] = {
+                "reason": "daily_limit",
+                "message": _stop_message(outcome.stop_reason),
+                "retryable": False,
+            }
+        elif not isinstance(last_failure, Mapping):
+            payload["failure"] = {
+                "reason": outcome.stop_reason,
+                "message": _stop_message(outcome.stop_reason),
+                "retryable": False,
+            }
+    return payload
+
+
+def _stop_message(stop_reason: str) -> str:
+    return {
+        "target_reached": "the verified target was reached",
+        "queue_exhausted": (
+            "no candidate passed the title/location filters and the eligibility rules"
+        ),
+        "time_budget_exhausted": "the run time budget was exhausted",
+        "daily_limit_reached": "LinkedIn reported its daily application limit",
+        "run_locked": "another run is already using this workspace",
+    }.get(stop_reason, stop_reason.replace("_", " "))
+
+
+def _loop_exit_code(outcome: LoopOutcome) -> int:
+    if outcome.stop_reason == "target_reached":
+        return EXIT_VERIFIED
+    if outcome.stop_reason == "queue_exhausted" and outcome.waiting > 0:
+        return EXIT_WAITING_INPUT
+    return EXIT_FAILED
 
 
 def _select_cached_cv(
@@ -540,83 +759,6 @@ def _select_cached_cv(
         job=selection.as_job(),
         jd_text=jd_text,
     )
-
-
-def _queue_payload(
-    queue: JobQueue,
-    selection: "Selection",
-    ingested: Sequence[EnqueueResult],
-) -> dict[str, object]:
-    return {
-        "path": str(queue.path),
-        "selection": selection.as_dict(),
-        "ingested": [result.as_dict() for result in ingested],
-        "record": queue.get(selection.job_id).as_dict(),
-        "records": [record.as_dict() for record in queue.records.values()],
-    }
-
-
-def _queue_empty_payload(
-    *,
-    queue: JobQueue,
-    ingested: Sequence[EnqueueResult],
-    cv: Path | None,
-) -> dict[str, object]:
-    payload = _envelope(
-        run_id=None,
-        job={"id": None},
-        cv=cv,
-        result=SubmissionResult(
-            submitted=False,
-            attempts=0,
-            reason="no_eligible_job",
-        ),
-        message=(
-            "no candidate passed the title/location filters and the eligibility rules"
-        ),
-        artifacts=_empty_artifacts(),
-    )
-    payload["queue"] = {
-        "path": str(queue.path),
-        "selection": None,
-        "ingested": [result.as_dict() for result in ingested],
-        "record": None,
-        "records": [record.as_dict() for record in queue.records.values()],
-    }
-    return payload
-
-
-def _record_queue_outcome(
-    queue: JobQueue,
-    job_id: str,
-    payload: Mapping[str, object],
-) -> None:
-    failure = payload.get("failure")
-    reason = failure.get("reason") if isinstance(failure, Mapping) else None
-    if not isinstance(reason, str):
-        result = payload.get("result")
-        reason = str(result.get("reason")) if isinstance(result, Mapping) else "unknown"
-
-    if payload.get("status") == "verified":
-        state = "verified"
-    elif reason == "waiting_input":
-        state = "waiting_input"
-    elif reason in _BLOCKER_MESSAGES:
-        state = "ineligible"
-    else:
-        state = "failed"
-
-    detail: dict[str, object] = {"run_id": payload.get("run_id"), "reason": reason}
-    artifacts = payload.get("artifacts")
-    if isinstance(artifacts, Mapping) and artifacts.get("session_dir") is not None:
-        detail["session_dir"] = artifacts["session_dir"]
-    cv = payload.get("cv")
-    if isinstance(cv, str) and cv:
-        detail["cv"] = cv
-    cv_cache = payload.get("cv_cache")
-    if isinstance(cv_cache, Mapping):
-        detail["cv_cache"] = dict(cv_cache)
-    queue.complete(job_id, state, reason, detail)
 
 
 def _run_application(
@@ -931,11 +1073,82 @@ def _positive_float(raw: str | None, default: float, name: str) -> float:
     return value
 
 
+def _run_max_seconds(raw: float | None, environment: Mapping[str, str]) -> float | None:
+    if raw is not None:
+        value = raw
+    else:
+        value = _non_negative_float(
+            environment.get("CAREER_OPS_RUN_MAX_SECONDS"),
+            float(DEFAULT_RUN_MAX_SECONDS),
+            "CAREER_OPS_RUN_MAX_SECONDS",
+        )
+    return None if value == 0 else value
+
+
+def _run_max_attempts(raw: int | None, environment: Mapping[str, str]) -> int:
+    if raw is not None:
+        return raw
+    return _positive_int(
+        environment.get("CAREER_OPS_MAX_ATTEMPTS_PER_JOB"),
+        DEFAULT_MAX_ATTEMPTS_PER_JOB,
+        "CAREER_OPS_MAX_ATTEMPTS_PER_JOB",
+    )
+
+
+def _run_low_watermark(raw: int | None, environment: Mapping[str, str]) -> int:
+    if raw is not None:
+        return raw
+    return _non_negative_int(
+        environment.get("CAREER_OPS_QUEUE_LOW_WATERMARK"),
+        DEFAULT_QUEUE_LOW_WATERMARK,
+        "CAREER_OPS_QUEUE_LOW_WATERMARK",
+    )
+
+
+def _non_negative_float(raw: str | None, default: float, name: str) -> float:
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a number, got {raw!r}") from exc
+    if value < 0:
+        raise ValueError(f"{name} must be zero or greater, got {raw!r}")
+    return value
+
+
+def _positive_int(raw: str | None, default: int, name: str) -> int:
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer, got {raw!r}") from exc
+    if value < 1:
+        raise ValueError(f"{name} must be at least 1, got {raw!r}")
+    return value
+
+
+def _non_negative_int(raw: str | None, default: int, name: str) -> int:
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer, got {raw!r}") from exc
+    if value < 0:
+        raise ValueError(f"{name} must be zero or greater, got {raw!r}")
+    return value
+
+
 def _reason_message(reason: str) -> str:
     return {
         "not_confirmed": "LinkedIn did not confirm the application",
         "wrong_cv": "the selected CV is not the expected PDF",
         "missing_cv": "no CV is selected on the form",
+        "daily_limit": "LinkedIn reported its daily application limit",
+        "attempts_exhausted": "the job used all attempts for this run",
+        "run_interrupted": "the previous run stopped while this attempt was in progress",
         "renderer_timeout": "the renderer did not answer before the deadline",
         "renderer_timeout_after_submit": (
             "the renderer timed out after the submit click; LinkedIn may already "

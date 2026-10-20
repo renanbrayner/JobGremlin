@@ -433,6 +433,25 @@ def test_the_real_adapter_without_answers_fails_before_a_session(run, workspace,
     assert not (workspace / "output" / "sessions").exists()
 
 
+def test_the_real_adapter_reports_a_linkedin_daily_limit(paths):
+    from career_ops.adapter import LinkedInDailyLimit
+
+    runner = ScriptedRunner(
+        completed_process(["cdp"], stdout="page\n"),
+        completed_process(["cdp"], stdout="arquivo setado: /tmp/cv.pdf\n"),
+        completed_process(
+            ["easyapply"],
+            stdout="You've reached the daily limit for applications. Try again tomorrow.\n",
+        ),
+    )
+    adapter = _adapter(paths, runner)
+
+    with pytest.raises(LinkedInDailyLimit) as caught:
+        adapter.attach(adapter.cv)
+
+    assert caught.value.reason == "daily_limit"
+
+
 def test_a_cv_path_in_the_environment_is_expanded(run, workspace, env):
     cv = write_cv(workspace)
     env["CAREER_OPS_CV"] = "$CAREER_OPS_OUTPUT/" + cv.name

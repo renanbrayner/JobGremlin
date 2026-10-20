@@ -7,10 +7,9 @@ must handle:
 * ``failure``       — submit happens but LinkedIn never confirms;
 * ``wrong_cv``      — a previous PDF is selected and the guard aborts before submit;
 * ``timeout``       — the CV upload freezes the renderer on every attempt;
-* ``waiting_input`` — the form stops on a required question and is left open.
-
-The fake still writes screenshot files so every artifact path in the CLI JSON is
-real and inspectable.
+* ``waiting_input`` — the form stops on a required question and is left open;
+* ``job_closed``    — opening the job reports that it no longer accepts applications;
+* ``daily_limit``   — LinkedIn rejects the attempt because the daily limit was reached.
 """
 
 from __future__ import annotations
@@ -18,16 +17,26 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal, Sequence
 
-from career_ops.adapter import JobInfo, WaitingForInput
+from career_ops.adapter import JobInfo, LinkedInDailyLimit, WaitingForInput
 from career_ops.renderer import RendererTimeout
 
-FakeScenario = Literal["success", "failure", "wrong_cv", "timeout", "waiting_input"]
+FakeScenario = Literal[
+    "success",
+    "failure",
+    "wrong_cv",
+    "timeout",
+    "waiting_input",
+    "job_closed",
+    "daily_limit",
+]
 FAKE_SCENARIOS: tuple[FakeScenario, ...] = (
     "success",
     "failure",
     "wrong_cv",
     "timeout",
     "waiting_input",
+    "job_closed",
+    "daily_limit",
 )
 _WRONG_CV = "cv-previous-application.pdf"
 
@@ -49,11 +58,14 @@ class FakeApplicationAdapter:
         self.scenario = scenario
 
     def open(self) -> JobInfo:
+        if self.scenario == "daily_limit":
+            raise LinkedInDailyLimit()
         return JobInfo(
             id=self.job_id,
             title="Fake React Engineer",
             company="Fake Company",
             url=f"https://www.linkedin.com/jobs/view/{self.job_id}/",
+            closed=self.scenario == "job_closed",
         )
 
     def attach(self, expected_cv: Path) -> None:
