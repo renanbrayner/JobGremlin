@@ -531,7 +531,7 @@ def main(
                 run_id=session.run_id,
                 target_goal=DEFAULT_TARGET,
             )
-            _close_unparked_form(adapter, payload)
+            _record_unparked_form(session, adapter, payload, job_id)
     except RunLocked as exc:
         return _emit(
             _error_payload(job_id=job_id, reason="run_locked", message=str(exc), cv=cv),
@@ -668,7 +668,10 @@ def _run_queue(
         return decision.cv, decision
 
     def apply(selection: Selection, expected_cv: Path) -> Mapping[str, object]:
-        current = parked_store.load()
+        try:
+            current = parked_store.load()
+        except ValueError:
+            current = None
         parked_target = (
             current.target
             if current is not None and current.job_id != selection.job_id
@@ -711,7 +714,7 @@ def _run_queue(
             run_id=run_id,
             target_goal=args.target,
         )
-        _close_unparked_form(adapter, payload)
+        _record_unparked_form(session, adapter, payload, selection.job_id)
         return payload
 
     video = (
@@ -789,10 +792,10 @@ def _run_queue(
                     run_id=run_id,
                     environment=environment,
                 )
-                current = parked_store.load()
-                payload["waiting_input"] = (
-                    current.as_dict() if current is not None else None
-                )
+                waiting_input, parked_error = _parked_summary(parked_store)
+                payload["waiting_input"] = waiting_input
+                if parked_error is not None:
+                    payload["parked_form_error"] = parked_error
                 return _emit(payload, EXIT_FAILED)
             assert outcome is not None
     except RunLocked as exc:
@@ -822,8 +825,10 @@ def _run_queue(
         run_id=run_id,
         environment=environment,
     )
-    current = parked_store.load()
-    payload["waiting_input"] = current.as_dict() if current is not None else None
+    waiting_input, parked_error = _parked_summary(parked_store)
+    payload["waiting_input"] = waiting_input
+    if parked_error is not None:
+        payload["parked_form_error"] = parked_error
     return _emit(payload, _loop_exit_code(outcome))
 
 
@@ -1094,7 +1099,6 @@ def _run_application(
                 retryable=True,
             ),
             message=str(exc),
-            questions=exc.questions,
             pending=exc.pending,
             target=exc.target,
         )
@@ -1150,7 +1154,6 @@ def _payload(
     cv: Path,
     result: SubmissionResult,
     message: str,
-    questions: Sequence[str] = (),
     pending: Sequence[PendingQuestion] = (),
     target: str | None = None,
 ) -> dict[str, object]:
@@ -1165,7 +1168,6 @@ def _payload(
         cv=cv,
         result=result,
         message=message,
-        questions=questions,
         pending=pending,
         target=target,
         artifacts={
@@ -1212,7 +1214,6 @@ def _envelope(
     result: SubmissionResult,
     message: str,
     artifacts: Mapping[str, object],
-    questions: Sequence[str] = (),
     pending: Sequence[PendingQuestion] = (),
     target: str | None = None,
 ) -> dict[str, object]:
@@ -1223,8 +1224,6 @@ def _envelope(
             "message": message,
             "retryable": result.retryable,
         }
-        if questions:
-            failure["questions"] = list(questions)
         if pending:
             failure["pending"] = [question.as_dict() for question in pending]
         if target is not None:
@@ -1313,20 +1312,42 @@ def _pending_questions_from_payload(
         ]
         if parsed:
             return tuple(parsed)
-    raw_questions = failure.get("questions")
-    if isinstance(raw_questions, list):
-        return tuple(PendingQuestion(text=str(question)) for question in raw_questions)
     return ()
 
 
-def _close_unparked_form(
+def _parked_summary(
+    store: ParkedFormStore,
+) -> tuple[dict[str, object] | None, str | None]:
+    """Return the parked record for the run JSON without failing the run."""
+    try:
+        parked = store.load()
+    except ValueError as exc:
+        return None, str(exc)
+    return (parked.as_dict() if parked is not None else None), None
+
+
+def _record_unparked_form(
+    session: SessionRecorder,
     adapter: ApplicationAdapter,
     payload: Mapping[str, object],
+    job_id: str,
 ) -> None:
-    """Close the tab of a form we refused to park, so only one stays open."""
+    """Close a refused form tab and leave evidence of the decision."""
     failure = payload.get("failure")
     if not isinstance(failure, Mapping) or failure.get("reason") != "parked_form_limit":
         return
+    try:
+        session.record(
+            "waiting",
+            "failed",
+            job_id=job_id,
+            detail={
+                "reason": "parked_form_limit",
+                "message": str(failure.get("message") or ""),
+            },
+        )
+    except Exception:  # noqa: BLE001 - evidence must not change the outcome
+        pass
     try:
         adapter.discard_waiting_form()
     except Exception:  # noqa: BLE001 - closing the extra tab is best effort

@@ -240,7 +240,11 @@ class RealApplicationAdapter:
             label="submit application",
             timeout=self.apply_timeout,
         )
-        _raise_if_waiting(output, target=self._target_id)
+        if _is_waiting(output):
+            _raise_if_waiting(
+                output,
+                target=self._target_id or self._find_job_target(),
+            )
         _raise_if_daily_limit(output)
         # Exit 1 means the submit click happened but the script did not see the
         # confirmation text.  The guard verifies through jobinfo next, so this is
@@ -381,12 +385,15 @@ class RealApplicationAdapter:
                 return target_id
         return None
 
-    def _cdp_eval(self, script: str, *, label: str) -> object:
-        argv = [str(self.cdp), "eval", script]
+    def _cdp_argv(self, *args: str) -> list[str]:
+        argv = [str(self.cdp), *args]
         if self._target_id is not None:
             argv.extend(["--target-id", self._target_id])
+        return argv
+
+    def _cdp_eval(self, script: str, *, label: str) -> object:
         output = self._run(
-            argv,
+            self._cdp_argv("eval", script),
             label=label,
             timeout=self.jobinfo_timeout,
         )
@@ -409,7 +416,7 @@ class RealApplicationAdapter:
         uses since that incident.
         """
         opened = self._run(
-            [str(self.cdp), "goto", APPLICATION_SETTINGS_URL, "--sleep", "3"],
+            self._cdp_argv("goto", APPLICATION_SETTINGS_URL, "--sleep", "3"),
             label="open application settings",
             timeout=self.jobinfo_timeout,
         )
@@ -419,7 +426,7 @@ class RealApplicationAdapter:
                 f"{_tail(opened.stderr or opened.stdout)}"
             )
         uploaded = self._run(
-            [str(self.cdp), "upload", "input[type=file]", str(cv)],
+            self._cdp_argv("upload", "input[type=file]", str(cv)),
             label="preload CV",
             timeout=self.jobinfo_timeout,
         )

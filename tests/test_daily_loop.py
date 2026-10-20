@@ -10,7 +10,7 @@ from career_ops.cli import main
 from career_ops.loop import DailyLoop, LoopConfig, LoopOutcome
 from career_ops.queue import Candidate, JobQueue, Selection
 from career_ops.run_state import RunState
-from conftest import FRONTEND_JD, invoke, write_cv, write_jd_fixtures
+from conftest import invoke, write_cv, write_jds
 
 
 def _candidates(workspace: Path, count: int = 25) -> Path:
@@ -30,13 +30,6 @@ def _candidates(workspace: Path, count: int = 25) -> Path:
         encoding="utf-8",
     )
     return path
-
-
-def _jds(workspace: Path, count: int = 25) -> Path:
-    return write_jd_fixtures(
-        workspace,
-        {str(index): FRONTEND_JD for index in range(1, count + 1)},
-    )
 
 
 def _queue(workspace: Path) -> dict:
@@ -75,7 +68,7 @@ def _invoke_daily(
         "--candidates",
         str(_candidates(workspace, count=count)),
         "--jd-dir",
-        str(_jds(workspace, count=count)),
+        str(write_jds(workspace, count)),
         "--cv",
         str(write_cv(workspace)),
         "--adapter",
@@ -334,7 +327,7 @@ def test_the_time_budget_stops_before_opening_the_next_job(
 ):
     fixed = datetime(2026, 10, 20, 12, 0, 0, tzinfo=timezone.utc)
     candidates = _candidates(workspace, count=5)
-    jds = _jds(workspace, count=5)
+    jds = write_jds(workspace, 5)
     cv = write_cv(workspace)
 
     exit_code = main(
@@ -372,7 +365,7 @@ def test_an_unexpected_loop_crash_still_writes_a_report(
     workspace, env, capsys, monkeypatch
 ):
     candidates = _candidates(workspace, count=1)
-    jds = _jds(workspace, count=1)
+    jds = write_jds(workspace, 1)
     cv = write_cv(workspace)
 
     def crash(self, *args, **kwargs):

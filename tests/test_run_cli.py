@@ -314,9 +314,10 @@ def test_the_real_adapter_fills_a_new_job_in_its_own_tab(paths):
     adapter.open()
     adapter.attach(adapter.cv)
 
+    for call in runner.calls[2:5]:
+        assert call[call.index("--target-id") + 1] == "target-2"
     easyapply = runner.calls[4]
     assert Path(easyapply[0]).name == "easyapply"
-    assert easyapply[easyapply.index("--target-id") + 1] == "target-2"
 
 
 def test_the_real_adapter_resumes_the_parked_tab_without_reopening_the_form(paths):
@@ -340,6 +341,29 @@ def test_the_real_adapter_resumes_the_parked_tab_without_reopening_the_form(path
     easyapply = runner.calls[1]
     assert "--resume" in easyapply
     assert easyapply[easyapply.index("--target-id") + 1] == "target-1"
+
+
+def test_a_question_during_submit_still_records_the_form_target(paths):
+    from career_ops.adapter import WaitingForInput
+
+    runner = ScriptedRunner(
+        completed_process(
+            ["easyapply"],
+            returncode=6,
+            stdout="   ? [radio: Yes | No]  Are you authorized to work?\n",
+        ),
+        completed_process(
+            ["cdp-targets"],
+            stdout="page\ttarget-9\tJob\t"
+            "https://www.linkedin.com/jobs/view/4411222/\n",
+        ),
+    )
+    adapter = _adapter(paths, runner)
+
+    with pytest.raises(WaitingForInput) as caught:
+        adapter.submit()
+
+    assert caught.value.target == "target-9"
 
 
 def test_the_real_adapter_reports_a_missing_parked_tab(paths):
@@ -515,8 +539,12 @@ def test_a_waiting_form_returns_exit_6_and_keeps_the_question(run, workspace):
     assert payload["result"]["reason"] == "waiting_input"
     assert payload["result"]["retryable"] is True
     assert payload["failure"]["reason"] == "waiting_input"
-    assert payload["failure"]["questions"] == [
-        "? [radio: Yes | No]  Are you authorized to work?"
+    assert payload["failure"]["pending"] == [
+        {
+            "text": "Are you authorized to work?",
+            "kind": "radio",
+            "options": ["Yes", "No"],
+        }
     ]
 
     session_dir = Path(payload["artifacts"]["session_dir"])

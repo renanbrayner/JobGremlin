@@ -6,21 +6,13 @@ from pathlib import Path
 from career_ops import cli
 from career_ops.fake_adapter import FakeApplicationAdapter
 from conftest import (
-    FRONTEND_JD,
     invoke,
     read_queue,
     read_run_state,
     write_candidates,
     write_cv,
-    write_jd_fixtures,
+    write_jds,
 )
-
-
-def _jds(workspace: Path, count: int = 2, *, start: int = 1) -> Path:
-    return write_jd_fixtures(
-        workspace,
-        {str(index): FRONTEND_JD for index in range(start, start + count)},
-    )
 
 
 def _parked_path(workspace: Path) -> Path:
@@ -40,7 +32,7 @@ def _run_waiting(
         "--candidates",
         str(write_candidates(workspace, count, start=start)),
         "--jd-dir",
-        str(_jds(workspace, count=count, start=start)),
+        str(write_jds(workspace, count, start=start)),
         "--cv",
         str(write_cv(workspace)),
         "--adapter",
@@ -101,6 +93,13 @@ def test_exit_6_parks_one_form_and_the_loop_moves_to_the_next_job(run, workspace
     assert records["2"]["attempts"] == 1
     assert read_run_state(workspace, "daily-waiting")["jobs"]["1"]["waiting"] is True
 
+    second_events = (
+        workspace / "output" / "sessions" / "daily-waiting" / "2" / "events.jsonl"
+    ).read_text(encoding="utf-8")
+    last = json.loads(second_events.splitlines()[-1])
+    assert last["stage"] == "waiting"
+    assert last["detail"]["reason"] == "parked_form_limit"
+
 
 def test_the_loop_applies_a_normal_job_while_a_form_is_parked(
     workspace, env, capsys, monkeypatch
@@ -127,7 +126,7 @@ def test_the_loop_applies_a_normal_job_while_a_form_is_parked(
             "--candidates",
             str(write_candidates(workspace, 2)),
             "--jd-dir",
-            str(_jds(workspace, 2)),
+            str(write_jds(workspace, 2)),
             "--cv",
             str(write_cv(workspace)),
             "--adapter",
@@ -377,7 +376,7 @@ def test_a_corrupt_parked_record_is_reported_as_json(run, workspace):
         "--candidates",
         str(write_candidates(workspace, 1)),
         "--jd-dir",
-        str(_jds(workspace, count=1)),
+        str(write_jds(workspace, 1)),
         "--cv",
         str(write_cv(workspace)),
         "--adapter",

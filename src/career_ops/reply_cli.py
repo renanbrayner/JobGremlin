@@ -284,19 +284,25 @@ def main(
             EXIT_PRECONDITION,
         )
 
-    payload = cli._park_if_waiting(
-        payload,
-        store=store,
-        run_id=parked.run_id,
-        target_goal=parked.target_goal,
-    )
+    try:
+        payload = cli._park_if_waiting(
+            payload,
+            store=store,
+            run_id=parked.run_id,
+            target_goal=parked.target_goal,
+        )
+    except ValueError as exc:
+        payload["parked_form_error"] = str(exc)
     waiting_again = payload.get("waiting_input") is not None
     if not waiting_again:
-        store.clear()
+        try:
+            store.clear()
+        except (OSError, ValueError) as exc:
+            payload["parked_form_error"] = str(exc)
 
     payload["answers"] = {"path": str(answers_path), "written": written}
     _persist(paths, parked, payload, clock=now)
-    return cli._emit(_reply(payload), _exit_code(payload))
+    return cli._emit(_reply(payload), cli._exit_code(payload))
 
 
 def validate_answers(
@@ -531,14 +537,6 @@ def _reply(payload: dict[str, object]) -> dict[str, object]:
     payload["command"] = COMMAND
     payload.setdefault("answers", None)
     return payload
-
-
-def _exit_code(payload: Mapping[str, object]) -> int:
-    if payload.get("status") == "verified":
-        return EXIT_VERIFIED
-    if _reason(payload) == "waiting_input":
-        return EXIT_WAITING_INPUT
-    return EXIT_FAILED
 
 
 if __name__ == "__main__":

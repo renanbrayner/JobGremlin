@@ -76,7 +76,6 @@ class ParkedForm:
             "session_dir": self.session_dir,
             "target_goal": self.target_goal,
             "parked_at": self.parked_at,
-            "answers_file": ANSWERS_FILENAME,
             "resume_hint": (
                 "career-ops-reply --run-id {run_id} --job {job_id} "
                 "--token {token} --answer '<question>=<answer>'"

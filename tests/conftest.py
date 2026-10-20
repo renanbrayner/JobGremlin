@@ -129,6 +129,19 @@ def write_jd_fixtures(
     return root
 
 
+def write_jds(
+    workspace: Path,
+    count: int,
+    text: str = FRONTEND_JD,
+    *,
+    start: int = 1,
+) -> Path:
+    return write_jd_fixtures(
+        workspace,
+        {str(index): text for index in range(start, start + count)},
+    )
+
+
 class ScriptedRunner:
     """Stand-in for subprocess.run that returns a scripted sequence.
 
