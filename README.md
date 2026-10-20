@@ -1,4 +1,4 @@
-# career-automation-mvp (workspace paralelo)
+# JobGremlin (workspace paralelo)
 
 CLI determinística de candidaturas, em desenvolvimento **em paralelo e isolada**
 do sistema atual. O Hermes, o cron, a allowlist, `~/.local/bin` e o checkout

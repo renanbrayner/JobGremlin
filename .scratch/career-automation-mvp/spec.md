@@ -149,5 +149,5 @@ Quando um formulário exigir resposta desconhecida, ele fica estacionado em uma 
 - O `openai-tailor` será uma dependência do checkout upstream; o adaptador isola a CLI dele.
 - O sistema atual não será desabilitado nem alterado. A integração com Hermes/cron fica como handoff para o usuário.
 - O help em JSON é o contrato de descoberta para o Hermes: comandos, argumentos, exit codes, exemplos e schema de saída.
-- O novo repositório será `/home/gremlin/code/hackajob`, conforme escolhido.
+- O novo repositório será `/home/gremlin/code/jobgremlin`, conforme escolhido.
 - Esta spec está publicada em `.scratch/career-automation-mvp/spec.md` com `Status: ready-for-agent`.
