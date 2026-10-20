@@ -1,0 +1,236 @@
+{
+  "date": "2026-10-20",
+  "mode": "fake-adapter-offline",
+  "baseline": {
+    "cards": 1950,
+    "unique_jobs": 344,
+    "shortlist": 129,
+    "jds_read": 12,
+    "eligible": 4,
+    "submitted": 0,
+    "verified": 0,
+    "screenshots": 0,
+    "note": "o renderer congelou no upload do CV; nenhuma candidatura foi enviada e não existe screenshot por vaga"
+  },
+  "steps": [
+    {
+      "label": "1 vaga",
+      "run_id": "rehearsal-one-2026-10-20",
+      "status": "verified",
+      "stop_reason": "target_reached",
+      "target": 1,
+      "metrics": {
+        "unique_jobs": 1,
+        "shortlist": 1,
+        "jds_read": 1,
+        "eligible": 1,
+        "submitted": 1,
+        "verified": 1,
+        "failures": 0,
+        "waiting": 0,
+        "cvs_generated": 1,
+        "cvs_reused": 0,
+        "screenshots": 4
+      },
+      "artifacts": {
+        "Sessão": "output/rehearsals/2026-10-20/workspace/output/sessions/rehearsal-one-2026-10-20",
+        "report.md": "output/rehearsals/2026-10-20/workspace/output/sessions/rehearsal-one-2026-10-20/report.md",
+        "report.html": "output/rehearsals/2026-10-20/workspace/output/sessions/rehearsal-one-2026-10-20/report.html",
+        "summary.txt": "output/rehearsals/2026-10-20/workspace/output/sessions/rehearsal-one-2026-10-20/summary.txt",
+        "summary.json": "output/rehearsals/2026-10-20/workspace/output/sessions/rehearsal-one-2026-10-20/summary.json"
+      }
+    },
+    {
+      "label": "3 vagas",
+      "run_id": "rehearsal-three-2026-10-20",
+      "status": "verified",
+      "stop_reason": "target_reached",
+      "target": 3,
+      "metrics": {
+        "unique_jobs": 6,
+        "shortlist": 4,
+        "jds_read": 4,
+        "eligible": 3,
+        "submitted": 3,
+        "verified": 3,
+        "failures": 0,
+        "waiting": 0,
+        "cvs_generated": 1,
+        "cvs_reused": 2,
+        "screenshots": 12
+      },
+      "artifacts": {
+        "Sessão": "output/rehearsals/2026-10-20/workspace/output/sessions/rehearsal-three-2026-10-20",
+        "report.md": "output/rehearsals/2026-10-20/workspace/output/sessions/rehearsal-three-2026-10-20/report.md",
+        "report.html": "output/rehearsals/2026-10-20/workspace/output/sessions/rehearsal-three-2026-10-20/report.html",
+        "summary.txt": "output/rehearsals/2026-10-20/workspace/output/sessions/rehearsal-three-2026-10-20/summary.txt",
+        "summary.json": "output/rehearsals/2026-10-20/workspace/output/sessions/rehearsal-three-2026-10-20/summary.json"
+      }
+    },
+    {
+      "label": "20 vagas",
+      "run_id": "rehearsal-twenty-2026-10-20",
+      "status": "verified",
+      "stop_reason": "target_reached",
+      "target": 20,
+      "metrics": {
+        "unique_jobs": 25,
+        "shortlist": 25,
+        "jds_read": 20,
+        "eligible": 20,
+        "submitted": 20,
+        "verified": 20,
+        "failures": 0,
+        "waiting": 0,
+        "cvs_generated": 1,
+        "cvs_reused": 19,
+        "screenshots": 80
+      },
+      "artifacts": {
+        "Sessão": "output/rehearsals/2026-10-20/workspace/output/sessions/rehearsal-twenty-2026-10-20",
+        "report.md": "output/rehearsals/2026-10-20/workspace/output/sessions/rehearsal-twenty-2026-10-20/report.md",
+        "report.html": "output/rehearsals/2026-10-20/workspace/output/sessions/rehearsal-twenty-2026-10-20/report.html",
+        "summary.txt": "output/rehearsals/2026-10-20/workspace/output/sessions/rehearsal-twenty-2026-10-20/summary.txt",
+        "summary.json": "output/rehearsals/2026-10-20/workspace/output/sessions/rehearsal-twenty-2026-10-20/summary.json"
+      }
+    }
+  ],
+  "comparison": {
+    "baseline_date": "2026-10-19",
+    "rows": [
+      {
+        "metric": "unique_jobs",
+        "label": "Vagas únicas",
+        "baseline": 344,
+        "values": [
+          1,
+          6,
+          25
+        ]
+      },
+      {
+        "metric": "shortlist",
+        "label": "Shortlist",
+        "baseline": 129,
+        "values": [
+          1,
+          4,
+          25
+        ]
+      },
+      {
+        "metric": "jds_read",
+        "label": "JDs lidas",
+        "baseline": 12,
+        "values": [
+          1,
+          4,
+          20
+        ]
+      },
+      {
+        "metric": "eligible",
+        "label": "Elegíveis",
+        "baseline": 4,
+        "values": [
+          1,
+          3,
+          20
+        ]
+      },
+      {
+        "metric": "submitted",
+        "label": "Enviadas (clique)",
+        "baseline": 0,
+        "values": [
+          1,
+          3,
+          20
+        ]
+      },
+      {
+        "metric": "verified",
+        "label": "Verificadas",
+        "baseline": 0,
+        "values": [
+          1,
+          3,
+          20
+        ]
+      },
+      {
+        "metric": "screenshots",
+        "label": "Screenshots",
+        "baseline": 0,
+        "values": [
+          4,
+          12,
+          80
+        ]
+      }
+    ],
+    "cards_replayed": false
+  },
+  "isolation": {
+    "unchanged": true,
+    "targets": [
+      {
+        "name": "hermes",
+        "paths": [
+          "~/.hermes"
+        ],
+        "commands": [],
+        "present_before": true,
+        "present_after": true,
+        "changed": false,
+        "differences": []
+      },
+      {
+        "name": "allowlist",
+        "paths": [
+          "~/.hermes/allowlist.json"
+        ],
+        "commands": [],
+        "present_before": false,
+        "present_after": false,
+        "changed": false,
+        "differences": []
+      },
+      {
+        "name": "cron",
+        "paths": [
+          "~/.config/systemd/user"
+        ],
+        "commands": [
+          "crontab -l"
+        ],
+        "present_before": true,
+        "present_after": true,
+        "changed": false,
+        "differences": []
+      },
+      {
+        "name": "local_bin",
+        "paths": [
+          "~/.local/bin"
+        ],
+        "commands": [],
+        "present_before": true,
+        "present_after": true,
+        "changed": false,
+        "differences": []
+      },
+      {
+        "name": "career_ops_upstream",
+        "paths": [
+          "~/.local/share/career-ops"
+        ],
+        "commands": [],
+        "present_before": false,
+        "present_after": false,
+        "changed": false,
+        "differences": []
+      }
+    ]
+  }
+}

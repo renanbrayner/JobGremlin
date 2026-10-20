@@ -1,0 +1,900 @@
+{
+  "command": "career-ops-help",
+  "schema_version": 1,
+  "isolation": {
+    "parallel": true,
+    "summary": "JobGremlin runs in parallel and in isolation. It never changes Hermes, the cron job, the allowlist, ~/.local/bin or the current career-ops checkout.",
+    "does_not_change": [
+      "Hermes",
+      "cron",
+      "allowlist",
+      "~/.local/bin",
+      "current career-ops checkout"
+    ],
+    "writes": [
+      "config/",
+      "data/",
+      "output/"
+    ]
+  },
+  "commands": [
+    {
+      "name": "career-ops-run",
+      "summary": "Apply to one explicit LinkedIn job or run the daily loop over a candidate queue.",
+      "description": "Apply to one explicit LinkedIn job or to the first eligible job from a persistent candidate queue, record a session and return JSON. Success is reported only when LinkedIn confirms the application.",
+      "usage": "usage: career-ops-run [-h] [--job JOB] [--candidates CANDIDATES]\n                      [--jd-dir JD_DIR] [--requeue-reason REQUEUE_REASON]\n                      [--target TARGET] [--max-seconds MAX_SECONDS]\n                      [--max-attempts MAX_ATTEMPTS]\n                      [--queue-low-watermark QUEUE_LOW_WATERMARK] [--cv CV]\n                      [--cv-min-score CV_MIN_SCORE] [--answers ANSWERS]\n                      [--run-id RUN_ID] [--video] [--adapter {real,fake}]\n                      [--fake-scenario {success,failure,wrong_cv,timeout,waiting_input,job_closed,daily_limit,lost_tab}]",
+      "arguments": [],
+      "options": [
+        {
+          "name": "--help",
+          "names": [
+            "-h",
+            "--help"
+          ],
+          "dest": "help",
+          "required": false,
+          "type": "boolean",
+          "action": "help",
+          "default": null,
+          "choices": null,
+          "metavar": null,
+          "help": "show this help message and exit"
+        },
+        {
+          "name": "--job",
+          "names": [
+            "--job"
+          ],
+          "dest": "job",
+          "required": false,
+          "type": "string",
+          "action": "store",
+          "default": null,
+          "choices": null,
+          "metavar": null,
+          "help": "LinkedIn job id to apply to (mutually exclusive with --candidates)"
+        },
+        {
+          "name": "--candidates",
+          "names": [
+            "--candidates"
+          ],
+          "dest": "candidates",
+          "required": false,
+          "type": "string",
+          "action": "store",
+          "default": null,
+          "choices": null,
+          "metavar": null,
+          "help": "JSON array/object or TSV list of candidates; the first eligible job is applied and the queue is persisted in data/queue.json"
+        },
+        {
+          "name": "--jd-dir",
+          "names": [
+            "--jd-dir"
+          ],
+          "dest": "jd_dir",
+          "required": false,
+          "type": "string",
+          "action": "store",
+          "default": null,
+          "choices": null,
+          "metavar": null,
+          "help": "read JD text files as <job-id>.txt from this directory instead of LinkedIn's guest endpoint (offline runs and tests)"
+        },
+        {
+          "name": "--requeue-reason",
+          "names": [
+            "--requeue-reason"
+          ],
+          "dest": "requeue_reason",
+          "required": false,
+          "type": "string",
+          "action": "store",
+          "default": null,
+          "choices": null,
+          "metavar": null,
+          "help": "explicitly allow blocked ids in --candidates mode to return to the queue; the reason is recorded in the queue history"
+        },
+        {
+          "name": "--target",
+          "names": [
+            "--target"
+          ],
+          "dest": "target",
+          "required": false,
+          "type": "integer",
+          "action": "store",
+          "default": 1,
+          "choices": null,
+          "metavar": null,
+          "help": "stop after this many verified applications in --candidates mode (default: 1; use 20 for the daily run)"
+        },
+        {
+          "name": "--max-seconds",
+          "names": [
+            "--max-seconds"
+          ],
+          "dest": "max_seconds",
+          "required": false,
+          "type": "number",
+          "action": "store",
+          "default": null,
+          "choices": null,
+          "metavar": null,
+          "help": "time budget for the whole --candidates run in seconds; 0 disables it (default: 4h or $CAREER_OPS_RUN_MAX_SECONDS)"
+        },
+        {
+          "name": "--max-attempts",
+          "names": [
+            "--max-attempts"
+          ],
+          "dest": "max_attempts",
+          "required": false,
+          "type": "integer",
+          "action": "store",
+          "default": null,
+          "choices": null,
+          "metavar": null,
+          "help": "attempts per job in one run (default: 2 or $CAREER_OPS_MAX_ATTEMPTS_PER_JOB)"
+        },
+        {
+          "name": "--queue-low-watermark",
+          "names": [
+            "--queue-low-watermark"
+          ],
+          "dest": "queue_low_watermark",
+          "required": false,
+          "type": "integer",
+          "action": "store",
+          "default": null,
+          "choices": null,
+          "metavar": null,
+          "help": "run discovery only when the backlog is at or below this number (default: 5 or $CAREER_OPS_QUEUE_LOW_WATERMARK)"
+        },
+        {
+          "name": "--cv",
+          "names": [
+            "--cv"
+          ],
+          "dest": "cv",
+          "required": false,
+          "type": "string",
+          "action": "store",
+          "default": null,
+          "choices": null,
+          "metavar": null,
+          "help": "PDF to attach, bypassing the CV cache (default: $CAREER_OPS_CV; in --candidates mode without it the cache generates or reuses one)"
+        },
+        {
+          "name": "--cv-min-score",
+          "names": [
+            "--cv-min-score"
+          ],
+          "dest": "cv_min_score",
+          "required": false,
+          "type": "number",
+          "action": "store",
+          "default": null,
+          "choices": null,
+          "metavar": null,
+          "help": "override the CV reuse threshold (0-1; default: 0.90 from config/cv-cache.json or $CAREER_OPS_CV_MIN_SCORE)"
+        },
+        {
+          "name": "--answers",
+          "names": [
+            "--answers"
+          ],
+          "dest": "answers",
+          "required": false,
+          "type": "string",
+          "action": "store",
+          "default": null,
+          "choices": null,
+          "metavar": null,
+          "help": "answers JSON (default: $CAREER_OPS_ANSWERS, then the workspace or upstream config/answers-hermes.json)"
+        },
+        {
+          "name": "--run-id",
+          "names": [
+            "--run-id"
+          ],
+          "dest": "run_id",
+          "required": false,
+          "type": "string",
+          "action": "store",
+          "default": null,
+          "choices": null,
+          "metavar": null,
+          "help": "session directory name under output/sessions/ (default: UTC timestamp)"
+        },
+        {
+          "name": "--video",
+          "names": [
+            "--video"
+          ],
+          "dest": "video",
+          "required": false,
+          "type": "boolean",
+          "action": "store_true",
+          "default": false,
+          "choices": null,
+          "metavar": null,
+          "help": "record one MP4 per daily run in output/sessions/<run_id>/video.mp4 (default: off or $CAREER_OPS_VIDEO)"
+        },
+        {
+          "name": "--adapter",
+          "names": [
+            "--adapter"
+          ],
+          "dest": "adapter",
+          "required": false,
+          "type": "string",
+          "action": "store",
+          "default": "real",
+          "choices": [
+            "real",
+            "fake"
+          ],
+          "metavar": null,
+          "help": "browser implementation; use fake for tests and demos (default: real)"
+        },
+        {
+          "name": "--fake-scenario",
+          "names": [
+            "--fake-scenario"
+          ],
+          "dest": "fake_scenario",
+          "required": false,
+          "type": "string",
+          "action": "store",
+          "default": "success",
+          "choices": [
+            "success",
+            "failure",
+            "wrong_cv",
+            "timeout",
+            "waiting_input",
+            "job_closed",
+            "daily_limit",
+            "lost_tab"
+          ],
+          "metavar": null,
+          "help": "outcome produced by --adapter fake (default: success)"
+        }
+      ],
+      "examples": [
+        "career-ops-run --job 4411222 --cv output/cv-renan-react.pdf",
+        "career-ops-run --job 4411222 --cv output/cv-renan-react.pdf --adapter fake",
+        "career-ops-run --candidates data/candidates.json --cv output/cv-renan-react.pdf",
+        "career-ops-run --candidates data/candidates.json --jd-dir data/jd-fixtures \\\n    --adapter fake --run-id queue-demo",
+        "career-ops-run --candidates data/candidates.json --jd-dir data/jd-fixtures \\\n    --adapter fake --target 20 --max-seconds 14400 --run-id daily-2026-10-20",
+        "career-ops-run --candidates data/candidates.json --requeue-reason \"jd now available\"",
+        "career-ops-run --help"
+      ],
+      "exit_codes": [
+        {
+          "code": 0,
+          "meaning": "LinkedIn confirmed the application (the verified target was reached)"
+        },
+        {
+          "code": 1,
+          "meaning": "the target was not reached (queue exhausted, time budget, daily limit or the last application failed), including when no candidate was eligible"
+        },
+        {
+          "code": 2,
+          "meaning": "invalid command-line arguments or an invalid candidate file"
+        },
+        {
+          "code": 3,
+          "meaning": "missing CV/answers/candidates/JD source, invalid configuration or another run holding data/run.lock"
+        },
+        {
+          "code": 6,
+          "meaning": "the candidate queue was exhausted while a form was waiting for an answer (the parked form is left open; answer it with career-ops-reply)"
+        }
+      ],
+      "output": {
+        "format": "json",
+        "schema": {
+          "type": "object",
+          "required": [
+            "command",
+            "status",
+            "run_id",
+            "job",
+            "result",
+            "failure",
+            "artifacts",
+            "cv",
+            "waiting_input"
+          ],
+          "properties": {
+            "command": {
+              "const": "career-ops-run"
+            },
+            "status": {
+              "type": "string",
+              "enum": [
+                "verified",
+                "failed"
+              ]
+            },
+            "run_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "target": {
+              "type": "integer"
+            },
+            "submitted": {
+              "type": "integer"
+            },
+            "verified": {
+              "type": "integer"
+            },
+            "waiting": {
+              "type": "integer"
+            },
+            "attempts": {
+              "type": "integer"
+            },
+            "stop_reason": {
+              "type": "string"
+            },
+            "job": {
+              "type": "object"
+            },
+            "result": {
+              "type": "object"
+            },
+            "failure": {
+              "type": [
+                "object",
+                "null"
+              ]
+            },
+            "artifacts": {
+              "type": "object"
+            },
+            "cv": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "waiting_input": {
+              "type": [
+                "object",
+                "null"
+              ]
+            },
+            "run": {
+              "type": "object"
+            },
+            "report": {
+              "type": [
+                "object",
+                "null"
+              ]
+            },
+            "report_error": {
+              "type": [
+                "object",
+                "null"
+              ]
+            },
+            "retention": {
+              "type": "object"
+            },
+            "summary": {
+              "type": "object"
+            },
+            "cv_cache": {
+              "type": "object"
+            },
+            "queue": {
+              "type": "object"
+            },
+            "applications": {
+              "type": "array"
+            },
+            "parked_form_error": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": true
+        }
+      }
+    },
+    {
+      "name": "career-ops-reply",
+      "summary": "Answer a parked LinkedIn form and resume it in one call.",
+      "description": "Validate answers for the parked LinkedIn form, write them to the workspace answers file and resume the same tab.",
+      "usage": "usage: career-ops-reply [-h] --run-id RUN_ID --job JOB --token TOKEN\n                        [--answer QUESTION=ANSWER] [--answers ANSWERS]\n                        [--answers-file ANSWERS_FILE] [--adapter {real,fake}]\n                        [--fake-scenario {success,failure,wrong_cv,timeout,waiting_input,job_closed,daily_limit,lost_tab}]",
+      "arguments": [],
+      "options": [
+        {
+          "name": "--help",
+          "names": [
+            "-h",
+            "--help"
+          ],
+          "dest": "help",
+          "required": false,
+          "type": "boolean",
+          "action": "help",
+          "default": null,
+          "choices": null,
+          "metavar": null,
+          "help": "show this help message and exit"
+        },
+        {
+          "name": "--run-id",
+          "names": [
+            "--run-id"
+          ],
+          "dest": "run_id",
+          "required": true,
+          "type": "string",
+          "action": "store",
+          "default": null,
+          "choices": null,
+          "metavar": null,
+          "help": "run that parked the form"
+        },
+        {
+          "name": "--job",
+          "names": [
+            "--job"
+          ],
+          "dest": "job",
+          "required": true,
+          "type": "string",
+          "action": "store",
+          "default": null,
+          "choices": null,
+          "metavar": null,
+          "help": "LinkedIn job id of the parked form"
+        },
+        {
+          "name": "--token",
+          "names": [
+            "--token"
+          ],
+          "dest": "token",
+          "required": true,
+          "type": "string",
+          "action": "store",
+          "default": null,
+          "choices": null,
+          "metavar": null,
+          "help": "resume token from the run JSON waiting_input.token"
+        },
+        {
+          "name": "--answer",
+          "names": [
+            "--answer"
+          ],
+          "dest": "answer",
+          "required": false,
+          "type": "string",
+          "action": "append",
+          "default": [],
+          "choices": null,
+          "metavar": "QUESTION=ANSWER",
+          "help": "answer to one pending question (repeatable)"
+        },
+        {
+          "name": "--answers",
+          "names": [
+            "--answers"
+          ],
+          "dest": "answers",
+          "required": false,
+          "type": "string",
+          "action": "store",
+          "default": null,
+          "choices": null,
+          "metavar": null,
+          "help": "JSON object (or path to one) with question => answer entries"
+        },
+        {
+          "name": "--answers-file",
+          "names": [
+            "--answers-file"
+          ],
+          "dest": "answers_file",
+          "required": false,
+          "type": "string",
+          "action": "store",
+          "default": null,
+          "choices": null,
+          "metavar": null,
+          "help": "workspace answers file to update (default: config/answers-hermes.json, or $CAREER_OPS_ANSWERS)"
+        },
+        {
+          "name": "--adapter",
+          "names": [
+            "--adapter"
+          ],
+          "dest": "adapter",
+          "required": false,
+          "type": "string",
+          "action": "store",
+          "default": "real",
+          "choices": [
+            "real",
+            "fake"
+          ],
+          "metavar": null,
+          "help": "browser implementation; use fake for tests and demos (default: real)"
+        },
+        {
+          "name": "--fake-scenario",
+          "names": [
+            "--fake-scenario"
+          ],
+          "dest": "fake_scenario",
+          "required": false,
+          "type": "string",
+          "action": "store",
+          "default": "success",
+          "choices": [
+            "success",
+            "failure",
+            "wrong_cv",
+            "timeout",
+            "waiting_input",
+            "job_closed",
+            "daily_limit",
+            "lost_tab"
+          ],
+          "metavar": null,
+          "help": "outcome produced by --adapter fake (default: success)"
+        }
+      ],
+      "examples": [
+        "career-ops-reply --run-id daily-2026-10-20 --job 4411222 --token a1b2c3 \\\n    --answer \"Are you authorized to work?=Yes\"",
+        "career-ops-reply --run-id daily-2026-10-20 --job 4411222 --token a1b2c3 \\\n    --answer \"Are you authorized to work?=Yes\" --adapter fake --fake-scenario success",
+        "career-ops-reply --help"
+      ],
+      "exit_codes": [
+        {
+          "code": 0,
+          "meaning": "LinkedIn confirmed the resumed application"
+        },
+        {
+          "code": 1,
+          "meaning": "the form resumed but the application failed or was not confirmed"
+        },
+        {
+          "code": 2,
+          "meaning": "invalid arguments or an answer that does not match a pending question"
+        },
+        {
+          "code": 3,
+          "meaning": "no parked form, token/run/job mismatch, lost CV or answers file unwritable"
+        },
+        {
+          "code": 6,
+          "meaning": "the resumed form stopped on another unknown question (still parked)"
+        }
+      ],
+      "output": {
+        "format": "json",
+        "schema": {
+          "type": "object",
+          "required": [
+            "command",
+            "status",
+            "run_id",
+            "job",
+            "result",
+            "failure",
+            "artifacts",
+            "cv",
+            "waiting_input",
+            "answers"
+          ],
+          "properties": {
+            "command": {
+              "const": "career-ops-reply"
+            },
+            "status": {
+              "type": "string",
+              "enum": [
+                "verified",
+                "failed"
+              ]
+            },
+            "run_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "job": {
+              "type": "object"
+            },
+            "result": {
+              "type": "object"
+            },
+            "failure": {
+              "type": [
+                "object",
+                "null"
+              ]
+            },
+            "artifacts": {
+              "type": "object"
+            },
+            "cv": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "waiting_input": {
+              "type": [
+                "object",
+                "null"
+              ]
+            },
+            "answers": {
+              "type": [
+                "object",
+                "null"
+              ]
+            },
+            "run": {
+              "type": "object"
+            },
+            "queue": {
+              "type": "object"
+            },
+            "parked_form_error": {
+              "type": "string"
+            },
+            "queue_error": {
+              "type": "string"
+            },
+            "run_error": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": true
+        }
+      }
+    },
+    {
+      "name": "career-ops-report",
+      "summary": "Rebuild one run's Markdown/HTML report, summaries and retention.",
+      "description": "Generate the Markdown/HTML report and text/JSON summaries for one run, then keep only the most recent finished runs.",
+      "usage": "usage: career-ops-report [-h] [--run-id RUN_ID] [--keep KEEP] [--no-prune]\n                         [--json]",
+      "arguments": [],
+      "options": [
+        {
+          "name": "--help",
+          "names": [
+            "-h",
+            "--help"
+          ],
+          "dest": "help",
+          "required": false,
+          "type": "boolean",
+          "action": "help",
+          "default": null,
+          "choices": null,
+          "metavar": null,
+          "help": "show this help message and exit"
+        },
+        {
+          "name": "--run-id",
+          "names": [
+            "--run-id"
+          ],
+          "dest": "run_id",
+          "required": false,
+          "type": "string",
+          "action": "store",
+          "default": null,
+          "choices": null,
+          "metavar": null,
+          "help": "run to report (default: the most recently finished run)"
+        },
+        {
+          "name": "--keep",
+          "names": [
+            "--keep"
+          ],
+          "dest": "keep",
+          "required": false,
+          "type": "integer",
+          "action": "store",
+          "default": null,
+          "choices": null,
+          "metavar": null,
+          "help": "finished runs to retain after reporting (default: 3 or $CAREER_OPS_RETENTION_RUNS)"
+        },
+        {
+          "name": "--no-prune",
+          "names": [
+            "--no-prune"
+          ],
+          "dest": "no_prune",
+          "required": false,
+          "type": "boolean",
+          "action": "store_true",
+          "default": false,
+          "choices": null,
+          "metavar": null,
+          "help": "generate the report without applying retention"
+        },
+        {
+          "name": "--json",
+          "names": [
+            "--json"
+          ],
+          "dest": "json",
+          "required": false,
+          "type": "boolean",
+          "action": "store_true",
+          "default": false,
+          "choices": null,
+          "metavar": null,
+          "help": "print the machine-readable summary instead of the text summary"
+        }
+      ],
+      "examples": [
+        "career-ops-report --run-id daily-2026-10-20",
+        "career-ops-report --run-id daily-2026-10-20 --json",
+        "career-ops-report --run-id daily-2026-10-20 --keep 5",
+        "career-ops-report --run-id daily-2026-10-20 --no-prune",
+        "career-ops-report --help"
+      ],
+      "exit_codes": [
+        {
+          "code": 0,
+          "meaning": "reports generated"
+        },
+        {
+          "code": 1,
+          "meaning": "the requested run does not exist or is unreadable"
+        },
+        {
+          "code": 2,
+          "meaning": "invalid command-line arguments"
+        },
+        {
+          "code": 3,
+          "meaning": "invalid workspace configuration or a retention failure"
+        }
+      ],
+      "output": {
+        "format": "text (default success) or json (--json and every error)",
+        "schema": {
+          "type": "object",
+          "required": [
+            "command",
+            "status",
+            "run_id",
+            "artifacts"
+          ],
+          "properties": {
+            "command": {
+              "const": "career-ops-report"
+            },
+            "status": {
+              "type": "string"
+            },
+            "run_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "failure": {
+              "type": "object"
+            },
+            "summary": {
+              "type": "object"
+            },
+            "jobs": {
+              "type": "array"
+            },
+            "artifacts": {
+              "type": "object"
+            },
+            "retention": {
+              "type": "object"
+            }
+          },
+          "additionalProperties": true
+        }
+      }
+    },
+    {
+      "name": "career-ops-help",
+      "summary": "Show the human command overview or the machine-readable JSON catalog.",
+      "description": "Show the human command overview or the machine-readable catalog used by Hermes to integrate with this CLI.",
+      "usage": "usage: career-ops-help [-h] [--json]",
+      "arguments": [],
+      "options": [
+        {
+          "name": "--help",
+          "names": [
+            "-h",
+            "--help"
+          ],
+          "dest": "help",
+          "required": false,
+          "type": "boolean",
+          "action": "help",
+          "default": null,
+          "choices": null,
+          "metavar": null,
+          "help": "show this help message and exit"
+        },
+        {
+          "name": "--json",
+          "names": [
+            "--json"
+          ],
+          "dest": "json",
+          "required": false,
+          "type": "boolean",
+          "action": "store_true",
+          "default": false,
+          "choices": null,
+          "metavar": null,
+          "help": "print the machine-readable command catalog instead of the overview"
+        }
+      ],
+      "examples": [
+        "career-ops-help",
+        "career-ops-help --json",
+        "career-ops-help --help"
+      ],
+      "exit_codes": [
+        {
+          "code": 0,
+          "meaning": "the overview or catalog was printed"
+        },
+        {
+          "code": 2,
+          "meaning": "invalid command-line arguments"
+        }
+      ],
+      "output": {
+        "format": "text (default) or json (--json)",
+        "schema": {
+          "type": "object",
+          "required": [
+            "command",
+            "schema_version",
+            "isolation",
+            "commands"
+          ],
+          "properties": {
+            "command": {
+              "const": "career-ops-help"
+            },
+            "schema_version": {
+              "const": 1
+            },
+            "isolation": {
+              "type": "object"
+            },
+            "commands": {
+              "type": "array"
+            }
+          },
+          "additionalProperties": true
+        }
+      }
+    }
+  ]
+}

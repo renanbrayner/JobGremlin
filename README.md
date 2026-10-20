@@ -120,6 +120,12 @@ Os testes cobrem:
   últimas sessões completas;
 - help: visão humana, catálogo JSON gerado do registro, `--help` de cada comando
   e validação do catálogo contra `docs/schema/help-catalog.schema.json`;
+- ensaio paralelo de 1/3/20 vagas com o adaptador fake, comparação com a linha
+  de base de 19/10 e artefatos completos por rodada;
+- fingerprint de `~/.hermes`, allowlist, cron, `~/.local/bin` e upstream antes e
+  depois do ensaio, com prova de que nada mudou;
+- handoff: comandos, exit codes, snapshot do catálogo e limitações conferidos
+  contra o registro;
 - o adaptador real embrulha `jobinfo`/`easyapply`/`cdp` sem alterar os scripts;
 - garantia de que os comandos não alteram o upstream falso.
 
@@ -680,6 +686,32 @@ O help e o catálogo declaram explicitamente que o sistema roda em paralelo e
 isolado: nada em Hermes, cron, allowlist, `~/.local/bin` ou no checkout atual
 do `career-ops` é alterado. O comando não resolve caminhos do workspace nem
 abre o navegador.
+
+## Ensaio paralelo e handoff
+
+O pacote de integração com o Hermes está em
+[`docs/HANDOFF.md`](docs/HANDOFF.md): comandos, catálogo JSON, exit codes,
+schema de saída, caminhos dos artefatos, limitações e o que ainda depende do
+Hermes. O snapshot do catálogo fica em
+`docs/handoff/help-catalog.json` e é conferido contra o registro pela suíte:
+
+```bash
+scripts/career-ops-help --json > docs/handoff/help-catalog.json
+```
+
+`scripts/rehearsal` executa o ensaio paralelo de 1, 3 e 20 vagas com o
+adaptador fake em um workspace descartável, compara o funil com a linha de base
+de 19/10 e faz fingerprint de `~/.hermes`, allowlist, cron, `~/.local/bin` e do
+`CAREER_OPS_UPSTREAM` antes e depois:
+
+```bash
+scripts/rehearsal --date 2026-10-20
+```
+
+Ele grava `docs/rehearsals/<data>.md` e `.json` e mantém os artefatos em
+`output/rehearsals/<data>/workspace/`. O ensaio de 20 vagas termina exatamente
+em 20 verificadas e não abre a 21ª. O relatório committed é
+[`docs/rehearsals/2026-10-20.md`](docs/rehearsals/2026-10-20.md).
 
 ## Navegador em paralelo
 
