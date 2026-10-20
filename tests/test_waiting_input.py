@@ -3,44 +3,23 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from conftest import FRONTEND_JD, invoke, write_cv, write_jd_fixtures
-
-
-def _candidates(workspace: Path, count: int = 2, *, start: int = 1) -> Path:
-    path = workspace / "data" / "candidates.json"
-    path.write_text(
-        json.dumps(
-            [
-                {
-                    "id": str(index),
-                    "title": "Desenvolvedor React",
-                    "location": "Recife, PE",
-                    "workplace": "Remote",
-                    "company": f"Company {index}",
-                }
-                for index in range(start, start + count)
-            ]
-        ),
-        encoding="utf-8",
-    )
-    return path
+from career_ops import cli
+from career_ops.fake_adapter import FakeApplicationAdapter
+from conftest import (
+    FRONTEND_JD,
+    invoke,
+    read_queue,
+    read_run_state,
+    write_candidates,
+    write_cv,
+    write_jd_fixtures,
+)
 
 
 def _jds(workspace: Path, count: int = 2, *, start: int = 1) -> Path:
     return write_jd_fixtures(
         workspace,
         {str(index): FRONTEND_JD for index in range(start, start + count)},
-    )
-
-
-def _queue(workspace: Path) -> dict[str, dict]:
-    payload = json.loads((workspace / "data" / "queue.json").read_text(encoding="utf-8"))
-    return {record["id"]: record for record in payload["records"]}
-
-
-def _run_state(workspace: Path, run_id: str) -> dict:
-    return json.loads(
-        (workspace / "data" / "runs" / f"{run_id}.json").read_text(encoding="utf-8")
     )
 
 
@@ -59,7 +38,7 @@ def _run_waiting(
     return invoke(
         run,
         "--candidates",
-        str(_candidates(workspace, count=count, start=start)),
+        str(write_candidates(workspace, count, start=start)),
         "--jd-dir",
         str(_jds(workspace, count=count, start=start)),
         "--cv",
@@ -115,12 +94,65 @@ def test_exit_6_parks_one_form_and_the_loop_moves_to_the_next_job(run, workspace
     assert on_disk["token"] == parked["token"]
     assert on_disk["questions"][0]["options"] == ["Yes", "No"]
 
-    records = _queue(workspace)
+    records = read_queue(workspace)
     assert records["1"]["state"] == "waiting_input"
     assert records["2"]["state"] == "failed"
     assert records["2"]["reason"] == "parked_form_limit"
     assert records["2"]["attempts"] == 1
-    assert _run_state(workspace, "daily-waiting")["jobs"]["1"]["waiting"] is True
+    assert read_run_state(workspace, "daily-waiting")["jobs"]["1"]["waiting"] is True
+
+
+def test_the_loop_applies_a_normal_job_while_a_form_is_parked(
+    workspace, env, capsys, monkeypatch
+):
+    def build_adapter(
+        adapter_name,
+        scenario,
+        paths,
+        environment,
+        *,
+        job_id,
+        cv,
+        answers,
+        apply_timeout,
+        parked_target=None,
+    ):
+        outcome = "waiting_input" if job_id == "1" else "success"
+        return FakeApplicationAdapter(job_id=job_id, cv=cv, scenario=outcome)
+
+    monkeypatch.setattr(cli, "_build_adapter", build_adapter)
+
+    exit_code = cli.main(
+        [
+            "--candidates",
+            str(write_candidates(workspace, 2)),
+            "--jd-dir",
+            str(_jds(workspace, 2)),
+            "--cv",
+            str(write_cv(workspace)),
+            "--adapter",
+            "fake",
+            "--target",
+            "2",
+            "--run-id",
+            "daily-next-job",
+        ],
+        environ=env,
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 6
+    assert payload["waiting"] == 1
+    assert payload["verified"] == 1
+    assert payload["waiting_input"]["job"]["id"] == "1"
+    records = read_queue(workspace)
+    assert records["1"]["state"] == "waiting_input"
+    assert records["2"]["state"] == "verified"
+    sessions = workspace / "output" / "sessions" / "daily-next-job"
+    assert sorted(path.name for path in sessions.iterdir() if path.is_dir()) == [
+        "1",
+        "2",
+    ]
 
 
 def test_a_second_waiting_form_does_not_replace_the_parked_one(run, workspace):
@@ -136,7 +168,7 @@ def test_a_second_waiting_form_does_not_replace_the_parked_one(run, workspace):
     assert second_payload["waiting_input"]["token"] == token
     assert second_payload["waiting_input"]["run_id"] == "daily-parked-first"
     assert second_payload["waiting"] == 0
-    records = _queue(workspace)
+    records = read_queue(workspace)
     assert records["3"]["reason"] == "parked_form_limit"
     assert records["4"]["reason"] == "parked_form_limit"
 
@@ -171,10 +203,10 @@ def test_reply_writes_the_workspace_answers_file_and_resumes_the_form(run, works
     assert answers == {"Are you authorized to work?": "Yes"}
     assert not _parked_path(workspace).exists()
 
-    record = _queue(workspace)["1"]
+    record = read_queue(workspace)["1"]
     assert record["state"] == "verified"
     assert record["reason"] == "verified"
-    state = _run_state(workspace, "daily-waiting")
+    state = read_run_state(workspace, "daily-waiting")
     assert state["verified"] == 1
     assert state["jobs"]["1"]["verified"] is True
 
@@ -200,7 +232,7 @@ def test_an_invalid_option_is_rejected_before_writing_or_resuming(run, workspace
     assert "No" in reply["failure"]["message"]
     assert not (workspace / "config" / "answers-hermes.json").exists()
     assert _parked_path(workspace).is_file()
-    assert _queue(workspace)["1"]["state"] == "waiting_input"
+    assert read_queue(workspace)["1"]["state"] == "waiting_input"
 
 
 def test_an_answer_for_another_question_is_rejected(run, workspace):
@@ -245,7 +277,7 @@ def test_a_resumed_form_that_finds_another_question_stays_parked(run, workspace)
     assert reply["waiting_input"]["token"] == parked["token"]
     assert reply["waiting_input"]["questions"][0]["options"] == ["Yes", "No"]
     assert _parked_path(workspace).is_file()
-    assert _queue(workspace)["1"]["state"] == "waiting_input"
+    assert read_queue(workspace)["1"]["state"] == "waiting_input"
 
 
 def test_a_lost_tab_is_a_recoverable_failure_and_is_never_counted_as_sent(run, workspace):
@@ -272,10 +304,10 @@ def test_a_lost_tab_is_a_recoverable_failure_and_is_never_counted_as_sent(run, w
     assert reply["failure"]["retryable"] is True
     assert not _parked_path(workspace).exists()
 
-    record = _queue(workspace)["1"]
+    record = read_queue(workspace)["1"]
     assert record["state"] == "failed"
     assert record["reason"] == "parked_form_lost"
-    assert _run_state(workspace, "daily-waiting")["verified"] == 0
+    assert read_run_state(workspace, "daily-waiting")["verified"] == 0
 
 
 def test_reply_requires_the_parked_form_and_its_token(run, workspace):
@@ -313,6 +345,51 @@ def test_reply_requires_the_parked_form_and_its_token(run, workspace):
     )
     assert missing.returncode == 3
     assert missing_payload["failure"]["reason"] == "no_parked_form"
+
+
+def test_an_explicit_job_never_reopens_its_own_parked_form(run, workspace):
+    _, payload = _run_waiting(run, workspace)
+    parked = payload["waiting_input"]
+
+    result, again = invoke(
+        run,
+        "--job",
+        parked["job"]["id"],
+        "--cv",
+        str(write_cv(workspace)),
+        "--adapter",
+        "fake",
+        "--run-id",
+        "explicit-parked",
+    )
+
+    assert result.returncode == 6
+    assert again["failure"]["reason"] == "waiting_input"
+    assert again["waiting_input"]["token"] == parked["token"]
+    assert not (workspace / "output" / "sessions" / "explicit-parked").exists()
+
+
+def test_a_corrupt_parked_record_is_reported_as_json(run, workspace):
+    _parked_path(workspace).write_text("{not json", encoding="utf-8")
+
+    result, payload = invoke(
+        run,
+        "--candidates",
+        str(write_candidates(workspace, 1)),
+        "--jd-dir",
+        str(_jds(workspace, count=1)),
+        "--cv",
+        str(write_cv(workspace)),
+        "--adapter",
+        "fake",
+        "--target",
+        "1",
+        "--run-id",
+        "corrupt-parked",
+    )
+
+    assert result.returncode == 3
+    assert payload["failure"]["reason"] == "parked_form_unreadable"
 
 
 def test_reply_help_is_human_readable(run):

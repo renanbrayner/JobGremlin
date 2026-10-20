@@ -196,20 +196,7 @@ class RealApplicationAdapter:
             self._ensure_target(self.resume_target)
         else:
             self._preload_cv(expected_cv)
-        argv = [
-            str(self.easyapply),
-            "--url",
-            self.job_url,
-            "--cv",
-            str(expected_cv),
-            "--answers",
-            str(self.answers),
-            "--cv-library-only",
-            "--max-steps",
-            "20",
-        ]
-        if resuming:
-            argv.extend(["--resume", "--target-id", str(self.resume_target)])
+        argv = self._easyapply_argv(expected_cv, resume=resuming)
         output = self._run(
             argv,
             label="resume application form" if resuming else "fill application form",
@@ -248,24 +235,8 @@ class RealApplicationAdapter:
 
     def submit(self) -> None:
         expected_cv = self._attached_cv or self.cv
-        argv = [
-            str(self.easyapply),
-            "--resume",
-            "--url",
-            self.job_url,
-            "--cv",
-            str(expected_cv),
-            "--answers",
-            str(self.answers),
-            "--cv-library-only",
-            "--submit",
-            "--max-steps",
-            "20",
-        ]
-        if self._target_id is not None:
-            argv.extend(["--target-id", self._target_id])
         output = self._run(
-            argv,
+            self._easyapply_argv(expected_cv, submit=True, resume=True),
             label="submit application",
             timeout=self.apply_timeout,
         )
@@ -316,6 +287,37 @@ class RealApplicationAdapter:
     def recover(self) -> None:
         self._recovery()
 
+    def discard_waiting_form(self) -> None:
+        """Close a form that cannot be parked because another one owns the slot."""
+        if self._target_id is None:
+            return
+        self._run(
+            [str(self.cdp_targets), "--close", self._target_id],
+            label="close unused form tab",
+            timeout=self.jobinfo_timeout,
+        )
+
+    def _easyapply_argv(self, cv: Path, *, resume: bool, submit: bool = False) -> list[str]:
+        argv = [
+            str(self.easyapply),
+            "--url",
+            self.job_url,
+            "--cv",
+            str(cv),
+            "--answers",
+            str(self.answers),
+            "--cv-library-only",
+            "--max-steps",
+            "20",
+        ]
+        if self._target_id is not None:
+            argv.extend(["--target-id", self._target_id])
+        if resume:
+            argv.append("--resume")
+        if submit:
+            argv.append("--submit")
+        return argv
+
     def _select_cv(self, cv: Path) -> None:
         script = _SELECT_CV_JS.replace("__NAME__", json.dumps(cv.name.lower()))
         payload = self._cdp_eval(script, label="select CV")
@@ -359,8 +361,19 @@ class RealApplicationAdapter:
         return targets
 
     def _ensure_target(self, target_id: str) -> None:
-        if not any(candidate == target_id for candidate, _ in self._targets()):
-            raise ParkedFormLost(f"the parked tab {target_id!r} no longer exists")
+        targets = self._targets()
+        expected = (
+            any(
+                candidate == target_id and self.job_id in url
+                for candidate, url in targets
+            )
+            if self.job_id
+            else any(candidate == target_id for candidate, _ in targets)
+        )
+        if not expected:
+            raise ParkedFormLost(
+                f"the parked tab {target_id!r} no longer shows job {self.job_id}"
+            )
 
     def _find_job_target(self) -> str | None:
         for target_id, url in self._targets():

@@ -297,6 +297,28 @@ def test_the_real_adapter_opens_the_next_job_in_a_new_tab_when_one_is_parked(pat
     assert runner.calls[1][2] == "target-2"
 
 
+def test_the_real_adapter_fills_a_new_job_in_its_own_tab(paths):
+    runner = ScriptedRunner(
+        completed_process(["cdp-targets"], stdout="new: target-2\n"),
+        completed_process(
+            ["jobinfo"],
+            stdout=json.dumps({"title": "React Engineer", "applied": False}) + "\n",
+        ),
+        completed_process(["cdp"], stdout="page\n"),
+        completed_process(["cdp"], stdout="arquivo setado: /tmp/cv.pdf\n"),
+        completed_process(["easyapply"], stdout="dry-run: nao enviei\n"),
+        completed_process(["cdp"], stdout='{"status":"selected"}\n'),
+    )
+    adapter = _adapter(paths, runner, parked_target="target-1")
+
+    adapter.open()
+    adapter.attach(adapter.cv)
+
+    easyapply = runner.calls[4]
+    assert Path(easyapply[0]).name == "easyapply"
+    assert easyapply[easyapply.index("--target-id") + 1] == "target-2"
+
+
 def test_the_real_adapter_resumes_the_parked_tab_without_reopening_the_form(paths):
     runner = ScriptedRunner(
         completed_process(

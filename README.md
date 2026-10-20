@@ -668,9 +668,10 @@ CDP_PORT=9334 scripts/career-ops-browser
 
 - `career-ops-run` já aplica uma vaga explícita ou executa o loop diário sobre
   uma lista persistente, com cache/geração de CV, lock, retomada e meta
-  verificada. `career-ops-report` regenera o relatório e aplica retenção.
-  `career-ops-reply`, `career-ops-status` e `career-ops-help --json` ainda são
-  construídos nos próximos tickets.
+  verificada. `career-ops-reply` responde ao formulário estacionado e
+  `career-ops-report` regenera o relatório e aplica retenção.
+  `career-ops-status` e `career-ops-help --json` ainda são construídos nos
+  próximos tickets.
 - O build de CV delega aos helpers do upstream (`openai-tailor.mjs` e
   `generate-pdf.mjs`), copiando `cv.md`/`config/profile.yml` para um staging root
   do workspace. O tailor real é validado por testes com runner injetado e pelo

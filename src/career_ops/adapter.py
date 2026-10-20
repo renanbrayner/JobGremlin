@@ -61,10 +61,6 @@ class PendingQuestion:
     kind: str = "text"
     options: tuple[str, ...] = ()
 
-    @property
-    def answer_key(self) -> str:
-        return self.text
-
     def as_text(self) -> str:
         """Legacy one-line form printed by ``easyapply`` and shown to humans."""
         if self.kind == "radio" and self.options:
@@ -178,3 +174,6 @@ class ApplicationAdapter(SubmissionAdapter, Protocol):
 
     def recover(self) -> None:
         """Make the browser usable again after a renderer timeout."""
+
+    def discard_waiting_form(self) -> None:
+        """Close the tab of a form that could not be parked (best effort)."""

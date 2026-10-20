@@ -111,3 +111,6 @@ class FakeApplicationAdapter:
 
     def recover(self) -> None:
         pass
+
+    def discard_waiting_form(self) -> None:
+        pass

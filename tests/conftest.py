@@ -75,6 +75,48 @@ def write_cv(workspace: Path, name: str = "cv-renan-react-2026-10-19.pdf") -> Pa
     return path
 
 
+def write_candidates(
+    workspace: Path,
+    count: int,
+    *,
+    start: int = 1,
+    title: str = "Desenvolvedor React",
+    location: str = "Recife, PE",
+    workplace: str = "Remote",
+    name: str = "candidates.json",
+) -> Path:
+    path = workspace / "data" / name
+    path.write_text(
+        json.dumps(
+            [
+                {
+                    "id": str(index),
+                    "title": title,
+                    "location": location,
+                    "workplace": workplace,
+                    "company": f"Company {index}",
+                }
+                for index in range(start, start + count)
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def read_queue(workspace: Path) -> dict[str, dict]:
+    payload = json.loads(
+        (workspace / "data" / "queue.json").read_text(encoding="utf-8")
+    )
+    return {record["id"]: record for record in payload["records"]}
+
+
+def read_run_state(workspace: Path, run_id: str) -> dict:
+    return json.loads(
+        (workspace / "data" / "runs" / f"{run_id}.json").read_text(encoding="utf-8")
+    )
+
+
 def write_jd_fixtures(
     workspace: Path,
     entries: dict[str, str],

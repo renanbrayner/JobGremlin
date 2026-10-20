@@ -124,10 +124,6 @@ class ParkedFormStore:
     def path(self) -> Path:
         return self.paths.data / PARKED_FILENAME
 
-    @property
-    def answers_path(self) -> Path:
-        return self.paths.config / ANSWERS_FILENAME
-
     def load(self) -> ParkedForm | None:
         if not self.path.is_file():
             return None
@@ -137,6 +133,11 @@ class ParkedFormStore:
             raise ValueError(f"could not read parked form {self.path}: {exc}") from exc
         if not isinstance(payload, Mapping):
             raise ValueError(f"parked form {self.path} must contain a JSON object")
+        version = payload.get("version")
+        if version is not None and version != PARKED_VERSION:
+            raise ValueError(
+                f"parked form {self.path} has unsupported version {version!r}"
+            )
         return ParkedForm.from_mapping(payload)
 
     def park(

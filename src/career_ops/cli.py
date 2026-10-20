@@ -467,7 +467,30 @@ def main(
 
     assert cv is not None  # --job mode always resolves a CV or fails above
     parked_store = ParkedFormStore(paths, clock=clock)
-    parked = parked_store.load()
+    try:
+        parked = parked_store.load()
+    except ValueError as exc:
+        return _emit(
+            _error_payload(
+                job_id=job_id,
+                reason="parked_form_unreadable",
+                message=str(exc),
+                cv=cv,
+            ),
+            EXIT_PRECONDITION,
+        )
+    if parked is not None and parked.job_id == job_id:
+        payload = _error_payload(
+            job_id=job_id,
+            reason="waiting_input",
+            message=(
+                f"job {job_id} already has a parked form; answer it with "
+                "career-ops-reply instead of reopening it"
+            ),
+            cv=cv,
+        )
+        payload["waiting_input"] = parked.as_dict()
+        return _emit(payload, EXIT_WAITING_INPUT)
     adapter = _build_adapter(
         args.adapter,
         args.fake_scenario,
@@ -508,6 +531,7 @@ def main(
                 run_id=session.run_id,
                 target_goal=DEFAULT_TARGET,
             )
+            _close_unparked_form(adapter, payload)
     except RunLocked as exc:
         return _emit(
             _error_payload(job_id=job_id, reason="run_locked", message=str(exc), cv=cv),
@@ -618,6 +642,18 @@ def _run_queue(
 
     decisions: dict[str, CvDecision] = {}
     parked_store = ParkedFormStore(paths, clock=clock)
+    try:
+        parked_store.load()
+    except ValueError as exc:
+        return _emit(
+            _error_payload(
+                job_id=None,
+                reason="parked_form_unreadable",
+                message=str(exc),
+                cv=cv,
+            ),
+            EXIT_PRECONDITION,
+        )
 
     def resolve_cv(selection: Selection) -> tuple[Path, CvDecision | None]:
         if cv is not None:
@@ -669,12 +705,14 @@ def _run_queue(
         decision = decisions.get(selection.job_id)
         if decision is not None:
             payload["cv_cache"] = decision.as_dict()
-        return _park_if_waiting(
+        payload = _park_if_waiting(
             payload,
             store=parked_store,
             run_id=run_id,
             target_goal=args.target,
         )
+        _close_unparked_form(adapter, payload)
+        return payload
 
     video = (
         _build_video(args.adapter)
@@ -1179,7 +1217,6 @@ def _envelope(
     target: str | None = None,
 ) -> dict[str, object]:
     failure: dict[str, object] | None = None
-    pending_form: dict[str, object] | None = None
     if not result.verified:
         failure = {
             "reason": result.reason,
@@ -1190,11 +1227,8 @@ def _envelope(
             failure["questions"] = list(questions)
         if pending:
             failure["pending"] = [question.as_dict() for question in pending]
-        if pending or result.reason == "waiting_input":
-            pending_form = {
-                "questions": [question.as_dict() for question in pending],
-                "target": target,
-            }
+        if target is not None:
+            failure["target"] = target
     return {
         "command": COMMAND,
         "status": "verified" if result.verified else "failed",
@@ -1205,7 +1239,6 @@ def _envelope(
         "artifacts": dict(artifacts),
         "cv": str(cv) if cv is not None else None,
         "waiting_input": None,
-        "pending_form": pending_form,
     }
 
 
@@ -1237,19 +1270,14 @@ def _park_if_waiting(
     target_goal: int,
 ) -> dict[str, object]:
     """Persist the single parked form and expose its resume token in the JSON."""
-    pending_form = payload.pop("pending_form", None)
     failure = payload.get("failure")
     if not isinstance(failure, Mapping) or failure.get("reason") != "waiting_input":
         return payload
 
-    questions = _pending_questions_from_payload(failure, pending_form)
+    questions = _pending_questions_from_payload(failure)
     job = payload.get("job")
     job_payload = dict(job) if isinstance(job, Mapping) else {"id": None}
-    target = (
-        str(pending_form.get("target"))
-        if isinstance(pending_form, Mapping) and pending_form.get("target") is not None
-        else None
-    )
+    target = str(failure["target"]) if failure.get("target") is not None else None
     artifacts = payload.get("artifacts")
     session_dir = (
         str(artifacts.get("session_dir"))
@@ -1275,18 +1303,7 @@ def _park_if_waiting(
 
 def _pending_questions_from_payload(
     failure: Mapping[str, object],
-    pending_form: object,
 ) -> tuple[PendingQuestion, ...]:
-    if isinstance(pending_form, Mapping):
-        raw = pending_form.get("questions")
-        if isinstance(raw, list):
-            parsed = [
-                PendingQuestion.from_mapping(item)
-                for item in raw
-                if isinstance(item, Mapping)
-            ]
-            if parsed:
-                return tuple(parsed)
     raw_pending = failure.get("pending")
     if isinstance(raw_pending, list):
         parsed = [
@@ -1300,6 +1317,20 @@ def _pending_questions_from_payload(
     if isinstance(raw_questions, list):
         return tuple(PendingQuestion(text=str(question)) for question in raw_questions)
     return ()
+
+
+def _close_unparked_form(
+    adapter: ApplicationAdapter,
+    payload: Mapping[str, object],
+) -> None:
+    """Close the tab of a form we refused to park, so only one stays open."""
+    failure = payload.get("failure")
+    if not isinstance(failure, Mapping) or failure.get("reason") != "parked_form_limit":
+        return
+    try:
+        adapter.discard_waiting_form()
+    except Exception:  # noqa: BLE001 - closing the extra tab is best effort
+        pass
 
 
 def _mark_parked_form_limit(
